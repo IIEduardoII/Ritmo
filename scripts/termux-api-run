@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+ROOT="$HOME/ritmo-termux"
+cd "$ROOT"
+set -a
+. "$ROOT/.env"
+set +a
+export COOKIE_SECURE=false
+exec "$ROOT/.venv/bin/gunicorn" --chdir "$ROOT/backend" --bind 127.0.0.1:8000 --workers 1 --threads 4 --timeout 60 --access-logfile - --error-logfile - app:app

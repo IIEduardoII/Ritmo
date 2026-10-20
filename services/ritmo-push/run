@@ -1,0 +1,2 @@
+#!/data/data/com.termux/files/usr/bin/sh
+exec "$HOME/ritmo-termux/.venv/bin/python" "$HOME/ritmo-termux/scripts/push-dispatcher.py"

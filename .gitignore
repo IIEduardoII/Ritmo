@@ -1,0 +1,47 @@
+# Ambientes e dependências
+.venv/
+env/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Configurações com segredos e chaves
+.env
+.env.*
+!.env.example
+backup.conf
+!.backup.conf.example
+
+# Bancos de dados e dumps locais
+*.sqlite3
+*.sqlite
+*.db
+*.sql
+
+# Certificados TLS e chaves privadas
+certs/*.crt
+certs/*.key
+*.key
+*.pem
+*.crt
+!certs/.gitkeep
+
+# Logs e estados em tempo real
+*.log
+supervise/
+stat
+status
+pid
+lock
+.stage-*
+ritmo-backups/
+backups/
+
+# Backups temporários e arquivos de sistema
+.pwa-backup*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

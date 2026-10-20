@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup do Ritmo aos domingos às 03h (Brasília)
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00 America/Sao_Paulo
+Persistent=true
+RandomizedDelaySec=5m
+Unit=treinos-backup.service
+[Install]
+WantedBy=timers.target

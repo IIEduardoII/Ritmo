@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup semanal do Ritmo
+Requires=docker.service
+After=docker.service network-online.target
+[Service]
+Type=oneshot
+User=cloud
+WorkingDirectory=/home/cloud/treinos
+ExecStart=/home/cloud/treinos/scripts/backup.sh weekly

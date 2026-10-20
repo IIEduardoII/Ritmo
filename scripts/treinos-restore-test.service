@@ -1,0 +1,10 @@
+[Unit]
+Description=Teste mensal isolado de restauração do Ritmo
+Requires=docker.service
+After=docker.service
+[Service]
+Type=oneshot
+User=cloud
+WorkingDirectory=/home/cloud/treinos
+Environment=RESTORE_TEST_PORT=18088
+ExecStart=/home/cloud/treinos/scripts/restore-test.sh

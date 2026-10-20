@@ -1,0 +1,6 @@
+# Copie para backup.conf (não versionado). O script nunca grava em USB desmontado.
+USB_MOUNT=
+# Ex.: /media/cloud/BACKUP (deve ser um ponto de montagem real).
+DRIVE_REMOTE=
+# Ex.: drive:Treinos (remote autenticado no rclone).
+RCLONE_CONFIG_DIR=/home/cloud/.config/treinos-rclone

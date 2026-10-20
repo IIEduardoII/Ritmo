@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/sh
+set -eu
+exec "$PREFIX/bin/nginx" -c "$HOME/ritmo-termux/nginx-termux.conf" -g 'daemon off;'
