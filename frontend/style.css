@@ -15,3 +15,35 @@ nav a{display:flex;align-items:center;gap:7px}nav a svg{width:18px;height:18px;f
 .name-search{margin:0 0 18px}.search-count:empty{display:none}.exercise-picker{margin-bottom:12px}.picker-status{display:block;margin-top:8px}
 
 .calendar button.scheduled{box-shadow:inset 0 -4px #FFD700}.calendar button.trained.scheduled{box-shadow:inset 0 -4px #FFD700;border:2px solid #2ECC71}
+
+/* Ritmo v1.1.0 Enhancements */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.chip{background:var(--soft);color:var(--ink);border:1px solid var(--line);border-radius:20px;padding:6px 14px;font-size:13px;cursor:pointer;font-weight:500;transition:all .15s}
+.chip:hover{border-color:var(--lime)}
+.chip.active{background:var(--lime);color:#111111;border-color:var(--lime);font-weight:700}
+
+.delta-badge{font-size:12px;font-weight:700;padding:4px 8px;border-radius:12px;display:inline-block}
+.delta-pos{background:#2ECC7125;color:#2ECC71;border:1px solid #2ECC7140}
+.delta-neg{background:#FFB4AB25;color:#FFB4AB;border:1px solid #FFB4AB40}
+.delta-zero{background:var(--soft);color:var(--muted);border:1px solid var(--line)}
+
+.photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px;margin:20px 0}
+.photo-card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;position:relative}
+.photo-card img{width:100%;height:180px;object-fit:cover;display:block}
+.photo-card-info{padding:10px 12px;font-size:12px;display:flex;justify-content:space-between;align-items:center}
+.photo-angle-tag{position:absolute;top:8px;left:8px;background:#111111bb;color:var(--lime);font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;text-transform:uppercase;backdrop-filter:blur(4px)}
+.photo-delete{background:transparent;border:0;color:var(--danger-ink);cursor:pointer;padding:4px;font-size:13px}
+
+.temporal-card{padding:20px;border-radius:16px;margin:16px 0;border:1px solid var(--line)}
+.temporal-past-rest{background:#1E1E1E;border-color:#555555;text-align:center;padding:30px 20px}
+.temporal-past-trained{background:#2ECC7112;border-color:#2ECC7155}
+.temporal-today-ready{background:#FFD70012;border-color:#FFD70066}
+
+.micro-chart{width:100%;max-height:160px;margin:16px 0}
+.micro-chart polyline{stroke:var(--lime);stroke-width:2.5;fill:none}
+.micro-chart circle{fill:var(--lime)}
+.micro-chart text{fill:var(--muted);font-size:11px}
+
+/* WCAG touch targets */
+.compact{min-height:36px;padding:8px 12px}
+.calendar button{min-height:42px}

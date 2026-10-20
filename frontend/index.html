@@ -1,13 +1,78 @@
 <!doctype html>
 <html lang="pt-BR">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#1E1E1E"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Ritmo"><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icons/ritmo-192.png" type="image/png"><link rel="apple-touch-icon" href="/icons/ritmo-apple-touch.png"><script src="/install.js" defer></script><title>Ritmo · Meus treinos</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script><script src="ai.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1E1E1E">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Ritmo">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/ritmo-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/ritmo-apple-touch.png">
+  <script src="/install.js" defer></script>
+  <title>Ritmo · Sistema Soberano de Treinos</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
 <body>
-<header><a class="brand" href="#inicio"><img class="brand-logo" src="/logo.svg" alt="Ritmo" width="150" height="48"><span class="brand-note">MEUS TREINOS</span></a><div class="header-actions"><button id="install-app" class="secondary" hidden>Instalar aplicativo</button><button id="logout" hidden>Sair</button></div></header>
+<header>
+  <a class="brand" href="#inicio">
+    <img class="brand-logo" src="/logo.svg" alt="Ritmo" width="150" height="48">
+    <span class="brand-note">SISTEMA SOBERANO</span>
+  </a>
+  <div class="header-actions">
+    <button id="install-app" class="secondary" hidden>Instalar aplicativo</button>
+  </div>
+</header>
 <div id="message" role="status" aria-live="polite" hidden></div>
 <main id="main"><p>Carregando seus treinos…</p></main>
-<nav id="nav" aria-label="Navegação principal" hidden><a href="#inicio"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 10 12 3 21 10M5 9v12h5v-7h4v7h5V9"/></svg>Visão geral</a><a href="#rotinas"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg>Rotinas</a><a href="#treino"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 8v8M7 5v14M7 12h10M17 5v14M21 8v8"/></svg>Treinar</a><a href="#exercicios"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>Exercícios</a><a href="#historico"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 3v18h18M6 16l5-5 4 2 6-8"/></svg>Evolução</a></nav>
-<dialog id="dialog"><div id="dialog-content"></div><button id="close-dialog" class="secondary">Cancelar</button></dialog>
-<dialog id="confirm-dialog"><h2>Confirmar ação</h2><p id="confirm-text"></p><div class="actions"><button id="confirm-yes">Confirmar</button><button id="confirm-no" class="secondary">Cancelar</button></div></dialog>
-<div id="timer" hidden><strong id="clock">00:00</strong><span>Descanso</span><button id="timer-toggle">Pausar</button><button id="timer-skip">Pular</button></div>
-<footer>Um treino de cada vez. <span>v1.2.0 · Seu registro pessoal de movimento.</span></footer>
-</body></html>
+<nav id="nav" aria-label="Navegação principal">
+  <a href="#inicio">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 10 12 3 21 10M5 9v12h5v-7h4v7h5V9"/></svg>
+    Início
+  </a>
+  <a href="#rotinas">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg>
+    Rotinas
+  </a>
+  <a href="#treino">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 8v8M7 5v14M7 12h10M17 5v14M21 8v8"/></svg>
+    Treinar
+  </a>
+  <a href="#biometria">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+    Evolução
+  </a>
+  <a href="#exercicios">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>
+    Exercícios
+  </a>
+  <a href="#historico">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 3v18h18M6 16l5-5 4 2 6-8"/></svg>
+    Histórico
+  </a>
+</nav>
+<dialog id="dialog">
+  <div id="dialog-content"></div>
+  <button id="close-dialog" class="secondary">Fechar</button>
+</dialog>
+<dialog id="confirm-dialog">
+  <h2>Confirmar ação</h2>
+  <p id="confirm-text"></p>
+  <div class="actions">
+    <button id="confirm-yes">Confirmar</button>
+    <button id="confirm-no" class="secondary">Cancelar</button>
+  </div>
+</dialog>
+<div id="timer" hidden>
+  <strong id="clock">00:00</strong>
+  <span>Descanso</span>
+  <button id="timer-toggle">Pausar</button>
+  <button id="timer-skip">Pular</button>
+</div>
+<footer>
+  Um treino de cada vez. <span>v1.1.0 · Sistema Soberano de Treinos.</span>
+</footer>
+</body>
+</html>

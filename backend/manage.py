@@ -1,17 +1,16 @@
-import getpass
-import secrets
-from app import Account, DB, ph
+import sys
+from app import User, DB
 
-password = getpass.getpass('Nova senha (mínimo de 12 caracteres): ')
-if len(password) < 12 or len(password) > 256:
-    raise SystemExit('Use de 12 a 256 caracteres.')
-if getpass.getpass('Confirme a senha: ') != password:
-    raise SystemExit('As senhas não coincidem.')
+print("Ritmo v1.1.0 - Gestão de Perfil Monousuário")
 with DB.begin() as db:
-    account = db.get(Account, 1)
-    if not account:
-        account = Account(id=1)
-        db.add(account)
-    account.password_hash = ph.hash(password)
-    account.version = secrets.token_hex(32)
-print('Senha configurada. Sessões anteriores foram invalidadas.')
+    u = db.get(User, 1)
+    if not u:
+        u = User(id=1, name='Atleta')
+        db.add(u)
+    print(f"Usuário ativo: id={u.id}, nome='{u.name}'")
+    if len(sys.argv) > 1:
+        new_name = sys.argv[1].strip()
+        if new_name:
+            u.name = new_name
+            print(f"Nome atualizado para '{u.name}'.")
+print("Modo Single-User ativo: login por senha desabilitado (acesso local/Tailscale direto).")

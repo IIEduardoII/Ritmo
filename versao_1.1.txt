@@ -1,0 +1,395 @@
+================================================================================
+                                   RITMO v1.1
+            Sistema Soberano de Gestão de Treinos e Evolução Física
+    ESPECIFICAÇÃO DE REQUISITOS, ARQUITETURA, MODELAGEM E PLANO DE OPERAÇÃO
+================================================================================
+
+Autor do Projeto:      Eduardo Camilo
+Ambiente Alvo:         Híbrido Linux Desktop & Android / Termux (Nginx, Gunicorn, SQLite WAL)
+Diretório de Backup:   /home/camilo/projetos/Ritmo/1.0
+Status:                Planejamento de Migração e Refatoração (v1.0 -> v1.1)
+Data da Especificação: Outubro de 2026 • Versão 1.1.0
+
+================================================================================
+1. SUMÁRIO EXECUTIVO E FILOSOFIA DE ENGENHARIA
+================================================================================
+
+O Ritmo v1.1 é uma evolução arquitetural focada em eliminar atrito diário de uso,
+garantir soberania de dados e transformar a aplicação em um sistema 100% autônomo,
+local-first e offline.
+
+Principais pilares desta atualização:
+  1. Eliminação de Fricção Operacional:
+     Bypass automático de senhas para uso monousuário e correção na lógica
+     temporal do calendário de treinos.
+  2. Autonomia e Zero Dependências Externas:
+     Remoção cirúrgica de qualquer chamada de API de IA de terceiros (Gemini),
+     reduzindo a pegada de memória e permitindo uso estritamente offline.
+  3. Novo Eixo de Evolução Física:
+     Acompanhamento histórico de peso corporal com cálculo de deltas e galeria
+     de fotos com pipeline de compressão nativo (WebP 1080px).
+  4. Taxonomia Baseada em Grupos Musculares:
+     Extinção de conceitos genéricos e abstratos de "foco" (hipertrofia, força),
+     substituindo-os por categorização anatômica direta e filtros reativos.
+  5. Unificação de Base de Código e Governança DevOps:
+     Extinção da separação física de branches entre servidor Linux e Termux,
+     com trava obrigatória de backup em `/home/camilo/projetos/Ritmo/1.0`
+     antes de qualquer alteração em ambiente produtivo.
+
+================================================================================
+2. DETALHAMENTO DAS 10 MELHORIAS E ESPECIFICAÇÕES TÉCNICAS
+================================================================================
+
+[PONTO 1] AUTENTICAÇÃO MONOUSUÁRIO (BYPASS DE SENHAS)
+--------------------------------------------------------------------------------
+- Diagnóstico: Em um sistema pessoal acessado via rede privada Tailscale ou
+  localhost, telas de login e senha geram fricção inútil a cada sessão.
+- Requisito Funcional (RF01):
+  * O sistema deve operar em modo "Single-User Trusted Local".
+  * Toda requisição que atinja o backend sem credenciais ativas é autenticada
+    automaticamente no perfil padrão (user_id = 1).
+  * A tela de login é suprimida da navegação padrão.
+- Regra de Negócio (RN01): O middleware de contexto do Flask injeta a sessão
+  do usuário padrão se a origem for 127.0.0.1 ou a faixa Tailscale (100.64.0.0/10).
+
+[PONTO 2] GALERIA DE FOTOS COM PIPELINE DE COMPRESSÃO WEBP
+--------------------------------------------------------------------------------
+- Diagnóstico: Fotos de celulares modernos (4 MB a 12 MB) esgotam o armazenamento
+  flash e inviabilizam rotinas de backup no Termux.
+- Requisito Funcional (RF02):
+  * Módulo dedicado para upload e acompanhamento visual da evolução física.
+  * Classificação de ângulo da foto (frontal, costas, lateral, detalhe).
+- Requisito Não Funcional (RNF01):
+  * Pipeline de compressão prévia via HTML Canvas no frontend ou Pillow no backend.
+  * Resolução máxima: largura de 1080px, mantendo o aspect-ratio.
+  * Formato de saída obrigatório: WebP com taxa de qualidade de 80%.
+  * Peso médio alvo: entre 120 KB e 250 KB por imagem.
+- Regra de Armazenamento: Imagens salvas no disco em `/static/uploads/evolution/`
+  com nomes em hash UUID; apenas metadados gravados no SQLite.
+
+[PONTO 3] DESACOPLAMENTO COMPLETO DA API GEMINI (100% OFFLINE)
+--------------------------------------------------------------------------------
+- Diagnóstico: Depender de LLMs externas adiciona latência, instabilidade de rede,
+  telemetria desnecessária e consumo de memória RAM (+30 MB no Termux).
+- Requisito Funcional (RF03):
+  * Expurgar completamente o SDK `google-generativeai` e bibliotecas correlatas.
+  * Remover variáveis `GEMINI_API_KEY` de arquivos `.env` e de inicialização.
+  * Eliminar rotas `/api/ai/*` e botões de interface ("Sugerir Treino", etc.).
+- Benefício: Consumo de memória reduzido e garantia de operação 100% autônoma.
+
+[PONTO 4] MÓDULO DE BIOMETRIA E PESO CORPORAL COM DELTA COMPARATIVO
+--------------------------------------------------------------------------------
+- Diagnóstico: Falta de rastreabilidade temporal para correlacionar treinos e
+  evolução da massa corporal.
+- Requisito Funcional (RF04):
+  * Registro rápido de peso (ex: 65.5 kg) associado a uma data e notas opcionais.
+  * Histórico em tabela cronológica decrescente.
+  * Cálculo dinâmico de delta comparativo em relação à medição anterior
+    (ex: exibe "+1.0 kg" ou "-0.5 kg").
+  * Micro-gráfico minimalista renderizado em SVG puro (zero dependências de JS).
+
+[PONTO 5] UNIFICAÇÃO DE BASES DE CÓDIGO E PADRONIZAÇÃO DE VERSÕES
+--------------------------------------------------------------------------------
+- Diagnóstico: Manter a versão 1.0 para Linux e 1.1 para Termux gerava esforço
+  duplicado de manutenção e divergência de funcionalidades.
+- Requisito Funcional (RF05):
+  * Base de código única (Single Codebase). O software detecta em tempo de
+    execução onde está operando via variáveis de ambiente:
+      IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
+  * Versionamento Semântico:
+      - Versão 1.0.0: Congelada como legado após unificação das bases.
+      - Versão 1.1.0: Nova versão oficial em produção com todas as melhorias.
+
+[PONTO 6] LIMPEZA DE UI E REMOÇÃO DE CAMPOS DE BUSCA REDUNDANTES
+--------------------------------------------------------------------------------
+- Diagnóstico: Barras de pesquisa em telas estáticas poluem a interface em telas
+  menores de smartphones e adicionam event listeners desnecessários.
+- Requisito Funcional (RF06):
+  * Remover inputs de busca de: Aba de Perfil, Aba de Calendário mensal e
+    Aba de Biometria/Peso.
+  * Manter buscas exclusivamente em: Catálogo de Exercícios e Histórico Geral.
+
+[PONTO 7] LÓGICA E UX DO CALENDÁRIO DE TREINOS
+--------------------------------------------------------------------------------
+- Diagnóstico: A interface permitia agendar treinos em datas passadas e exibia
+  opção de novo agendamento mesmo em dias onde o treino já havia sido concluído.
+- Requisito Funcional (RF07) / Matriz de Estados Temporais:
+  * Passado (Data < Hoje) COM treino realizado:
+      -> Exibe card detalhado do treino feito (séries, cargas, volume).
+      -> Bloqueia novos agendamentos; somente leitura.
+  * Passado (Data < Hoje) SEM treino realizado:
+      -> Exibe mensagem: "Dia de descanso / Nenhum treino realizado".
+      -> Oculta e desabilita qualquer botão de agendamento.
+  * Hoje (Data == Hoje) COM treino realizado:
+      -> Exibe resumo do treino concluído; oculta botão de agendamento duplicado.
+  * Hoje (Data == Hoje) SEM treino realizado:
+      -> Exibe treino programado com destaque no botão: [Iniciar Treino de Hoje].
+  * Futuro (Data > Hoje):
+      -> Exibe treino planejado ou botão [+ Agendar Treino] normalmente.
+
+[PONTO 8] BUSCA E FILTRO POR GRUPO MUSCULAR NA CRIAÇÃO DE ROTINAS
+--------------------------------------------------------------------------------
+- Diagnóstico: Selecionar exercícios em listas longas na criação de rotinas é lento.
+- Requisito Funcional (RF08):
+  * No modal de adição de exercícios à rotina, disponibilizar seletor por chips
+    de grupos musculares (Peito, Costas, Quadríceps, Posterior, Ombros,
+    Bíceps, Tríceps, Abdômen, Panturrilha).
+  * Filtro client-side instantâneo: clicar no chip isola os exercícios daquele grupo.
+  * Input de texto atua como refinamento secundário combinado com o chip ativo.
+
+[PONTO 9] EXTINÇÃO DE "FOCO" E MIGRAÇÃO PARA "GRUPO MUSCULAR"
+--------------------------------------------------------------------------------
+- Diagnóstico: Classificações como "força", "hipertrofia" e "resistência" são
+  abstratas e pouco práticas no preenchimento rotineiro de fichas.
+- Requisito Funcional (RF09) / Regra de Negócio (RN06):
+  * Eliminar completamente os campos e termos de "foco" em todo o banco e UI.
+  * Rotinas e treinos passam a ser tipificados diretamente pelos grupos
+    musculares envolvidos (ex: "Treino A - Peito e Tríceps").
+  * Sugestões de exercícios em rotinas passam a ser estritamente anatômicas.
+
+[PONTO 10] TRAVA OPERACIONAL DE BACKUP PRÉ-MIGRAÇÃO
+--------------------------------------------------------------------------------
+- Regra de Negócio Inegociável (RN07):
+  * Antes de qualquer migração de schema ou alteração de arquivos em produção,
+    o sistema deve gerar uma cópia integral consistente do projeto e do banco
+    SQLite em: `/home/camilo/projetos/Ritmo/1.0`.
+  * O script de deploy deve abortar imediatamente caso a integridade do
+    backup em `/home/camilo/projetos/Ritmo/1.0` não seja validada com sucesso.
+
+================================================================================
+3. MATRIZ DE REQUISITOS (MOSCOW)
+================================================================================
+
++-------+---------------+----------------------------------------------+--------+
+| ID    | Módulo        | Descrição da Funcionalidade                  | MoSCoW |
++-------+---------------+----------------------------------------------+--------+
+| RF01  | Autenticação  | Bypass de login (modo single-user confiável) | MUST   |
+| RF02  | Mídia / Fotos | Galeria de evolução com compressão WebP      | MUST   |
+| RF03  | Core / AI     | Remoção integral do SDK e chamadas do Gemini | MUST   |
+| RF04  | Biometria     | Registro de peso corporal com cálculo delta  | MUST   |
+| RF05  | Versionamento | Unificação de base de código (Linux/Termux)  | MUST   |
+| RF06  | UI / Filtros  | Supressão de barras de busca em abas simples | SHOULD |
+| RF07  | Calendário    | Trava temporal de datas passadas e status    | MUST   |
+| RF08  | Rotinas / UI  | Busca reativa por Grupo Muscular             | MUST   |
+| RF09  | Domínio       | Extinção de "foco" -> Grupos Musculares      | MUST   |
+| RN07  | DevOps        | Backup obrigatório em .../Ritmo/1.0          | MUST   |
+| RNF01 | Performance   | Resolução máx. 1080px e formato WebP         | MUST   |
+| RNF02 | Concorrência  | SQLite em modo WAL e busy_timeout = 5000     | MUST   |
++-------+---------------+----------------------------------------------+--------+
+
+================================================================================
+4. MODELAGEM DE DADOS RELACIONAL ATUALIZADA (SQLITE WAL)
+================================================================================
+
+-- 1. Usuário Padrão Único (Single-User Mode)
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT 'Atleta',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Garante existência do usuário id = 1
+INSERT OR IGNORE INTO users (id, name) VALUES (1, 'Atleta');
+
+-- 2. Histórico Biométrico (Peso Corporal e Notas)
+CREATE TABLE IF NOT EXISTS body_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+    weight DECIMAL(5,2) NOT NULL,
+    notes TEXT,
+    recorded_at DATE NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Galeria de Fotos de Evolução Física
+CREATE TABLE IF NOT EXISTS evolution_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+    metric_id INTEGER REFERENCES body_metrics(id) ON DELETE SET NULL,
+    photo_path TEXT NOT NULL,
+    angle TEXT CHECK(angle IN ('frontal', 'costas', 'lateral', 'outro')) DEFAULT 'frontal',
+    taken_at DATE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. Catálogo Anatômico de Exercícios
+CREATE TABLE IF NOT EXISTS exercises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    muscle_group TEXT NOT NULL CHECK(muscle_group IN (
+        'peito', 'costas', 'quadriceps', 'posterior', 
+        'ombros', 'biceps', 'triceps', 'abdomen', 'panturrilha', 'outro'
+    )),
+    equipment TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. Rotinas Anatômicas (Substituindo o antigo conceito de 'foco')
+CREATE TABLE IF NOT EXISTS routines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+    name TEXT NOT NULL,
+    target_muscle_groups TEXT NOT NULL, -- Ex: 'peito,triceps'
+    day_of_week INTEGER,                -- 0 (Dom) a 6 (Sáb)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 6. Associação Exercício-Rotina com Séries e Alvos
+CREATE TABLE IF NOT EXISTS routine_exercises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+    exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+    order_index INTEGER DEFAULT 0,
+    target_sets INTEGER DEFAULT 3,
+    target_reps TEXT DEFAULT '8-12',
+    rest_seconds INTEGER DEFAULT 90
+);
+
+-- 7. Histórico de Sessões de Treino Executadas
+CREATE TABLE IF NOT EXISTS workout_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES users(id),
+    routine_id INTEGER REFERENCES routines(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    started_at DATETIME NOT NULL,
+    completed_at DATETIME,
+    notes TEXT,
+    session_date DATE NOT NULL
+);
+
+-- 8. Séries Reais Executadas
+CREATE TABLE IF NOT EXISTS workout_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES workout_sessions(id) ON DELETE CASCADE,
+    exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+    set_number INTEGER NOT NULL,
+    weight_kg DECIMAL(5,2) NOT NULL,
+    reps INTEGER NOT NULL,
+    rpe DECIMAL(3,1),
+    completed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices Estratégicos para Otimização
+CREATE INDEX IF NOT EXISTS idx_metrics_date ON body_metrics(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_photos_date ON evolution_photos(taken_at);
+CREATE INDEX IF NOT EXISTS idx_exercises_muscle ON exercises(muscle_group);
+CREATE INDEX IF NOT EXISTS idx_sessions_date ON workout_sessions(session_date);
+
+================================================================================
+5. ESPECIFICAÇÃO DE ROTAS DA API RESTFUL (CONTRATOS)
+================================================================================
+
++--------+----------------------------+----------------------------------------+
+| Método | Endpoint                   | Descrição / Propósito                  |
++--------+----------------------------+----------------------------------------+
+| GET    | /api/calendar/month        | Retorna resumo de treinos por data     |
+| GET    | /api/calendar/day/<date>   | Retorna estado temporal detalhado do dia|
+| GET    | /api/exercises             | Lista catálogo filtrável por ?muscle=  |
+| POST   | /api/exercises             | Cadastra novo exercício                |
+| GET    | /api/routines              | Lista rotinas cadastradas              |
+| POST   | /api/routines              | Cria rotina por grupo muscular         |
+| GET    | /api/metrics/weight        | Retorna histórico de peso com deltas   |
+| POST   | /api/metrics/weight        | Registra medição corporal do dia       |
+| GET    | /api/evolution/photos      | Lista fotos de evolução física         |
+| POST   | /api/evolution/photos      | Upload de foto com compressão WebP     |
+| POST   | /api/workouts/start        | Inicia sessão de treino em tempo real  |
+| POST   | /api/workouts/<id>/finish  | Finaliza e consolida o treino feito    |
++--------+----------------------------+----------------------------------------+
+
+================================================================================
+6. AUTOMAÇÃO DE BACKUP PRÉ-MIGRAÇÃO (DEVOPS)
+================================================================================
+
+Script: `scripts/backup_pre_deploy.sh`
+Finalidade: Congelar com integridade absoluta o estado da v1.0 antes do deploy.
+
+--------------------------------------------------------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+BACKUP_DIR="/home/camilo/projetos/Ritmo/1.0"
+PROD_DIR="/home/camilo/projetos/Ritmo/prod"
+DB_SRC="$PROD_DIR/data/ritmo.db"
+
+echo "=========================================================="
+echo " [TRAVA DE SEGURANÇA] INICIANDO BACKUP DA VERSÃO 1.0      "
+echo "=========================================================="
+
+# 1. Cria o diretório alvo do backup se não existir
+mkdir -p "$BACKUP_DIR"
+
+# 2. Executa backup a quente e consistente do SQLite (WAL-safe)
+if [ -f "$DB_SRC" ]; then
+    echo "==> Realizando snapshot consistente do banco SQLite..."
+    sqlite3 "$DB_SRC" ".backup '$BACKUP_DIR/ritmo_v1.0.db'"
+    echo "[OK] Banco de dados salvo em: $BACKUP_DIR/ritmo_v1.0.db"
+else
+    echo "[AVISO] Arquivo de banco $DB_SRC não encontrado. Prosseguindo com código..."
+fi
+
+# 3. Sincroniza arquivos de código-fonte excluindo lixo e binários
+echo "==> Copiando snapshot integral do código-fonte..."
+rsync -av --delete \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.git' \
+    --exclude '.env' \
+    "$PROD_DIR/" "$BACKUP_DIR/"
+
+# 4. Trava de Validação: Confirma se o backup é válido
+if [ ! -f "$BACKUP_DIR/app.py" ]; then
+    echo "=========================================================="
+    echo " [ERRO FATAL] O backup não pôde ser validado com sucesso! "
+    echo " Abortando deploy em produção para evitar perda de dados.  "
+    echo "=========================================================="
+    exit 1
+fi
+
+echo "=========================================================="
+echo " [SUCESSO] Backup da v1.0 homologado e travado em:        "
+echo " $BACKUP_DIR "
+echo " Liberado para executar migrações e atualizações da v1.1. "
+echo "=========================================================="
+--------------------------------------------------------------------------------
+
+================================================================================
+7. ROTEIRO DE EXECUÇÃO SEQUENCIAL (ROADMAP v1.1)
+================================================================================
+
+ETAPA 1: Trava e Congelamento de Backup da v1.0
+  * Executar `backup_pre_deploy.sh` e assegurar que `/home/camilo/projetos/Ritmo/1.0`
+    contém o snapshot íntegro do código e banco legado.
+
+ETAPA 2: Limpeza Estrutural e Remoção de Dependências
+  * Desinstalar e remover referências ao pacote `google-generativeai`.
+  * Implementar bypass de autenticação automática para user_id = 1.
+  * Remover inputs de busca de abas estáticas (Perfil, Calendário, Biometria).
+
+ETAPA 3: Migração de Schema e Domínio de Treinos
+  * Executar migração SQL para excluir campos legados de "foco".
+  * Atualizar catálogo e formulário de rotinas com taxonomia por Grupos Musculares.
+  * Implementar busca e filtro reativo por chips na interface de seleção.
+
+ETAPA 4: Implementação do Calendário Inteligente
+  * Atualizar a lógica do frontend para respeitar a Matriz de Estados Temporais:
+    bloquear agendamentos no passado e exibir diretamente o treino realizado.
+
+ETAPA 5: Módulo de Evolução Física (Peso e Fotos)
+  * Criar tabela `body_metrics` e implementar cálculo dinâmico de delta de peso.
+  * Criar tabela `evolution_photos` e implementar pipeline de conversão WebP
+    (largura máxima de 1080px com 80% de qualidade).
+  * Criar interface da galeria com cards visuais de evolução.
+
+ETAPA 6: Validação de Deploy e Monitoramento no Termux
+  * Validar operação com Nginx + Gunicorn (`-w 1 --threads 2`).
+  * Verificar consumo de memória RAM RSS mantendo-se inferior a 45 MB.
+  * Confirmar inicialização correta sob o Runit com wake-lock ativado.
+
+================================================================================
+8. CONCLUSÃO
+================================================================================
+A presente especificação técnica unifica o ecossistema do Ritmo v1.1, conferindo
+total previsibilidade ao ciclo de vida do software, reduzindo ruídos cognitivos
+para o usuário e garantindo total soberania e integridade dos dados esportivos.
+================================================================================

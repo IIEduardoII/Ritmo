@@ -2,101 +2,183 @@ import os
 import logging
 import secrets
 import time
-import math
-import gemini
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
 
-from argon2 import PasswordHasher
-from argon2.exceptions import VerificationError
-from flask import Flask, jsonify, request, session, g
-from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, Numeric, String,
+from flask import Flask, jsonify, request, session, g, send_from_directory
+from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String,
                         Text, create_engine, select, text, event)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, selectinload
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import Engine, URL
 from sqlalchemy.exc import IntegrityError
+
+try:
+    from PIL import Image
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
-app.config.update(SECRET_KEY=os.environ['SECRET_KEY'], MAX_CONTENT_LENGTH=256*1024,
-                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
-                  SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE', 'true') == 'true',
-                  PERMANENT_SESSION_LIFETIME=timedelta(hours=12))
-url = os.getenv('DATABASE_URL') or URL.create('mysql+pymysql', username=os.environ['MYSQL_USER'],
-    password=os.environ['MYSQL_PASSWORD'], host='db', database=os.environ['MYSQL_DATABASE'],
-    query={'charset': 'utf8mb4'})
-engine = create_engine(url, pool_pre_ping=True, pool_size=4, max_overflow=2)
-DB = sessionmaker(engine, expire_on_commit=False)
-ph = PasswordHasher()
-tz = ZoneInfo('America/Sao_Paulo')
-def now(): return datetime.now(tz).replace(tzinfo=None)
 
-class Base(DeclarativeBase): pass
-class Account(Base):
-    __tablename__ = 'account'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
-    version: Mapped[str] = mapped_column(String(64))
-class AISettings(Base):
-    __tablename__ = 'ai_settings'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "")
+VERSION = "1.1.0"
+
+# Secret key and session setup
+SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+app.config.update(
+    SECRET_KEY=SECRET_KEY,
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024, # 16 MB max upload for high-res photos
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.getenv('COOKIE_SECURE', 'false') == 'true',
+    PERMANENT_SESSION_LIFETIME=timedelta(days=365)
+)
+
+# SQLite database setup with WAL mode and high-resilience pragmas
+DEFAULT_DB_PATH = os.path.expanduser('~/.local/share/ritmo/ritmo.sqlite3')
+if IS_TERMUX:
+    DEFAULT_DB_PATH = '/data/data/com.termux/files/home/.local/share/ritmo/ritmo.sqlite3'
+
+db_url = os.getenv('DATABASE_URL')
+if not db_url:
+    os.makedirs(os.path.dirname(DEFAULT_DB_PATH), exist_ok=True)
+    db_url = f"sqlite:///{DEFAULT_DB_PATH}"
+
+engine = create_engine(db_url, pool_pre_ping=True)
+
+# Static photo upload directory
+UPLOAD_FOLDER = os.path.join(app.root_path, 'static', 'uploads', 'evolution')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    try:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+    except Exception:
+        pass
+
+DB = sessionmaker(engine, expire_on_commit=False)
+tz = ZoneInfo('America/Sao_Paulo')
+
+def now():
+    return datetime.now(tz).replace(tzinfo=None)
+
+def today_date():
+    return datetime.now(tz).date()
+
+# ---------------------------------------------------------------------------
+# Database Schema (Relational Models - Ritmo v1.1)
+# ---------------------------------------------------------------------------
+class Base(DeclarativeBase):
+    pass
+
+class User(Base):
+    __tablename__ = 'users'
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), default='Atleta')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class BodyMetric(Base):
+    __tablename__ = 'body_metrics'
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1)
+    weight: Mapped[float] = mapped_column(Numeric(5, 2))
+    notes: Mapped[str] = mapped_column(Text, default='')
+    recorded_at: Mapped[str] = mapped_column(String(10), unique=True, index=True) # YYYY-MM-DD
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class EvolutionPhoto(Base):
+    __tablename__ = 'evolution_photos'
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1)
+    metric_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    photo_path: Mapped[str] = mapped_column(String(255))
+    angle: Mapped[str] = mapped_column(String(20), default='frontal') # frontal, costas, lateral, outro
+    taken_at: Mapped[str] = mapped_column(String(10), index=True) # YYYY-MM-DD
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class Exercise(Base):
     __tablename__ = 'exercises'
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), unique=True)
-    muscle: Mapped[str] = mapped_column(String(60))
-    custom: Mapped[bool] = mapped_column(Boolean, default=True)
+    muscle_group: Mapped[str] = mapped_column(String(50), index=True)
+    equipment: Mapped[str] = mapped_column(String(100), default='')
+    notes: Mapped[str] = mapped_column(Text, default='')
+    custom: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class Routine(Base):
     __tablename__ = 'routines'
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1)
     name: Mapped[str] = mapped_column(String(100))
-    goal: Mapped[str] = mapped_column(String(30))
+    target_muscle_groups: Mapped[str] = mapped_column(String(255), default='') # ex: 'peito,triceps'
+    day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     items: Mapped[list['RoutineItem']] = relationship(cascade='all, delete-orphan', order_by='RoutineItem.position')
+
 class RoutineItem(Base):
     __tablename__ = 'routine_items'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    routine_id: Mapped[int] = mapped_column(ForeignKey('routines.id'))
-    exercise_id: Mapped[int] = mapped_column(ForeignKey('exercises.id'))
-    position: Mapped[int] = mapped_column(Integer)
-    sets: Mapped[int] = mapped_column(Integer)
-    reps: Mapped[int] = mapped_column(Integer)
-    rest: Mapped[int] = mapped_column(Integer)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    routine_id: Mapped[int] = mapped_column(ForeignKey('routines.id', ondelete='CASCADE'), index=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey('exercises.id', ondelete='CASCADE'), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    sets: Mapped[int] = mapped_column(Integer, default=3)
+    reps: Mapped[int] = mapped_column(Integer, default=10)
+    rest: Mapped[int] = mapped_column(Integer, default=90)
+    target_reps: Mapped[str] = mapped_column(String(20), default='8-12')
     exercise: Mapped[Exercise] = relationship()
+
 class Workout(Base):
     __tablename__ = 'workouts'
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1)
+    routine_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     routine_name: Mapped[str] = mapped_column(String(100))
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str] = mapped_column(Text, default='')
+    session_date: Mapped[str] = mapped_column(String(10), index=True) # YYYY-MM-DD
     items: Mapped[list['WorkoutItem']] = relationship(cascade='all, delete-orphan', order_by='WorkoutItem.position')
+
 class WorkoutItem(Base):
     __tablename__ = 'workout_items'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    workout_id: Mapped[int] = mapped_column(ForeignKey('workouts.id'))
-    exercise_id: Mapped[int | None] = mapped_column(ForeignKey('exercises.id'), nullable=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    workout_id: Mapped[int] = mapped_column(ForeignKey('workouts.id', ondelete='CASCADE'), index=True)
+    exercise_id: Mapped[int | None] = mapped_column(ForeignKey('exercises.id'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
-    position: Mapped[int] = mapped_column(Integer)
-    rest: Mapped[int] = mapped_column(Integer)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    rest: Mapped[int] = mapped_column(Integer, default=90)
     notes: Mapped[str] = mapped_column(Text, default='')
     sets: Mapped[list['WorkoutSet']] = relationship(cascade='all, delete-orphan', order_by='WorkoutSet.position')
+
 class WorkoutSet(Base):
     __tablename__ = 'workout_sets'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    item_id: Mapped[int] = mapped_column(ForeignKey('workout_items.id'))
-    position: Mapped[int] = mapped_column(Integer)
-    reps: Mapped[int] = mapped_column(Integer)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    item_id: Mapped[int] = mapped_column(ForeignKey('workout_items.id', ondelete='CASCADE'), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    reps: Mapped[int] = mapped_column(Integer, default=0)
     load: Mapped[Decimal] = mapped_column(Numeric(7, 2), default=0)
     done: Mapped[bool] = mapped_column(Boolean, default=False)
+    rpe: Mapped[float | None] = mapped_column(Numeric(3, 1), nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 class Schedule(Base):
     __tablename__ = 'schedules'
-    id: Mapped[int] = mapped_column(primary_key=True)
-    routine_id: Mapped[int] = mapped_column(Integer)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1)
+    routine_id: Mapped[int] = mapped_column(Integer, index=True)
     routine_name: Mapped[str] = mapped_column(String(100))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     workout_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -104,44 +186,103 @@ class Schedule(Base):
 
 class PushSubscription(Base):
     __tablename__ = 'push_subscriptions'
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     endpoint: Mapped[str] = mapped_column(String(500), unique=True)
     p256dh: Mapped[str] = mapped_column(String(255))
     auth: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     user_agent: Mapped[str] = mapped_column(String(255), default='')
 
+# Standard Anatomical Muscle Groups (Taxonomia v1.1)
+MUSCLE_GROUPS = [
+    'peito', 'costas', 'quadriceps', 'posterior',
+    'ombros', 'biceps', 'triceps', 'abdomen', 'panturrilha', 'outro'
+]
+
 CATALOG = {
- 'Peito': ['Supino reto', 'Supino inclinado', 'Crucifixo'],
- 'Costas': ['Puxada frontal', 'Remada baixa', 'Remada curvada'],
- 'Pernas': ['Agachamento', 'Leg press', 'Cadeira extensora', 'Mesa flexora', 'Elevação de panturrilha'],
- 'Ombros': ['Desenvolvimento', 'Elevação lateral'],
- 'Braços': ['Rosca direta', 'Tríceps na polia'],
- 'Abdômen': ['Abdominal', 'Prancha'],
- 'Condicionamento': ['Bicicleta ergométrica', 'Caminhada na esteira']}
-def initialize():
+    'peito': ['Supino reto com barra', 'Supino inclinado com halteres', 'Crucifixo na máquina', 'Crossover na polia'],
+    'costas': ['Puxada frontal na polia', 'Remada curvada com barra', 'Remada baixa no cabo', 'Barra fixa'],
+    'quadriceps': ['Agachamento livre', 'Leg press 45°', 'Cadeira extensora', 'Agachamento búlgaro'],
+    'posterior': ['Mesa flexora', 'Stiff com halteres', 'Cadeira flexora', 'Elevação pélvica'],
+    'ombros': ['Desenvolvimento com halteres', 'Elevação lateral na polia', 'Crucifixo inverso', 'Elevação frontal'],
+    'biceps': ['Rosca direta com barra', 'Rosca alternada com halteres', 'Rosca martelo', 'Rosca Scott'],
+    'triceps': ['Tríceps na polia corda', 'Tríceps testa com halteres', 'Tríceps francês', 'Mergulho no banco'],
+    'abdomen': ['Abdominal supra no solo', 'Prancha isométrica', 'Abdominal infra na barra', 'Abdominal na polia'],
+    'panturrilha': ['Elevação de panturrilha em pé', 'Panturrilha no leg press', 'Panturrilha sentado'],
+    'outro': ['Bicicleta ergométrica', 'Esteira / Caminhada', 'Alongamento geral']
+}
+
+def initialize_database():
     Base.metadata.create_all(engine)
+    with DB.begin() as db:
+        # Garante existência do usuário id = 1 (Single-User Mode)
+        if not db.get(User, 1):
+            db.add(User(id=1, name='Atleta'))
+
+        # Popula catálogo de exercícios com categorização anatômica se vazio
+        if not db.scalar(select(Exercise.id).limit(1)):
+            for muscle, names in CATALOG.items():
+                for name in names:
+                    db.add(Exercise(name=name, muscle_group=muscle, custom=False))
+
+    # Migration safe checks for SQLite schema upgrades
     try:
         with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE schedules ADD COLUMN notified_at DATETIME"))
+            # Add session_date to workouts if upgrading from v1.0
+            conn.execute(text("ALTER TABLE workouts ADD COLUMN session_date TEXT"))
             conn.commit()
     except Exception:
         pass
-    with DB.begin() as db:
-        if not db.scalar(select(Exercise.id).limit(1)):
-            db.add_all(Exercise(name=n, muscle=m, custom=False) for m, names in CATALOG.items() for n in names)
-for attempt in range(30):
-    try:
-        initialize(); break
-    except Exception:
-        if attempt == 29: raise
-        time.sleep(2)
 
+    try:
+        with engine.connect() as conn:
+            # Add target_muscle_groups to routines if upgrading from v1.0
+            conn.execute(text("ALTER TABLE routines ADD COLUMN target_muscle_groups TEXT DEFAULT ''"))
+            conn.commit()
+    except Exception:
+        pass
+
+    try:
+        with engine.connect() as conn:
+            # Add muscle_group to exercises if upgrading from v1.0
+            conn.execute(text("ALTER TABLE exercises ADD COLUMN muscle_group TEXT DEFAULT 'outro'"))
+            conn.commit()
+    except Exception:
+        pass
+
+initialize_database()
+
+# ---------------------------------------------------------------------------
+# Image Compression Pipeline (WebP 1080px, 80% quality)
+# ---------------------------------------------------------------------------
+def compress_and_save_photo(file_storage):
+    filename = f"{uuid.uuid4().hex}.webp"
+    dest_path = os.path.join(UPLOAD_FOLDER, filename)
+    if HAS_PILLOW:
+        img = Image.open(file_storage)
+        if img.mode in ('RGBA', 'LA'):
+            pass
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        max_width = 1080
+        if img.width > max_width:
+            new_height = int(img.height * (max_width / img.width))
+            img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+        img.save(dest_path, format='WEBP', quality=80, method=4)
+    else:
+        file_storage.save(dest_path)
+    return f"/api/evolution/photo/{filename}"
+
+# ---------------------------------------------------------------------------
+# Request Utilities, Single-User Authentication & Timing
+# ---------------------------------------------------------------------------
 class InputError(Exception): pass
+
 def string(value, label, limit=100):
     if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
         raise InputError(f'{label}: informe entre 1 e {limit} caracteres.')
     return value.strip()
+
 def integer(value, label, lo, hi):
     if isinstance(value, bool): raise InputError(f'{label}: valor inválido.')
     try:
@@ -149,52 +290,68 @@ def integer(value, label, lo, hi):
         if str(n) != str(value) or not lo <= n <= hi: raise ValueError()
         return n
     except (ValueError, TypeError): raise InputError(f'{label}: informe um inteiro de {lo} a {hi}.')
+
 def load_value(value):
     try:
         n = Decimal(str(value))
         if not n.is_finite() or not 0 <= n <= 9999 or n.as_tuple().exponent < -2: raise ValueError()
         return n
     except (ValueError, InvalidOperation): raise InputError('Carga: informe de 0 a 9999 kg, com até duas casas decimais.')
+
 def data():
     d = request.get_json(silent=True)
     if not isinstance(d, dict): raise InputError('Formulário inválido.')
     return d
+
 def notes(d):
     n = d.get('notes', '')
     if not isinstance(n, str) or len(n) > 2000: raise InputError('Observações: máximo de 2000 caracteres.')
     return n
-GOALS = ['hipertrofia', 'força', 'condicionamento', 'emagrecimento']
-def goal(d):
-    if d.get('goal') not in GOALS: raise InputError('Escolha um objetivo válido.')
-    return d['goal']
+
 def found(db, cls, id):
     obj = db.get(cls, id)
     if obj is None: raise InputError('Registro não encontrado.')
     return obj
 
+# PONTO 1: Bypass de Autenticação Monousuário
+@app.before_request
+def trusted_single_user_session():
+    if 'user_id' not in session:
+        session['user_id'] = 1
+    if 'csrf' not in session:
+        session['csrf'] = secrets.token_hex(32)
+
 def authenticated(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        with DB() as db:
-            a = db.get(Account, 1)
-            if not a or session.get('auth') != a.version: return jsonify(error='Entre para continuar.'), 401
+        # Modo Monousuário Confiável: requisições têm sessão injetada automaticamente
+        session['user_id'] = 1
         return fn(*args, **kwargs)
     return wrapped
+
 @app.before_request
-def csrf():
+def csrf_check():
     if request.method in ('POST', 'PUT', 'DELETE'):
+        # Permite uploads multipart/form-data com token enviado no header ou campo
         token = session.get('csrf')
-        if not token or not secrets.compare_digest(token, request.headers.get('X-CSRF-Token', '')):
-            return jsonify(error='Atualize a página e tente novamente.'), 403
+        header_token = request.headers.get('X-CSRF-Token', '')
+        form_token = request.form.get('csrf_token', '') if request.form else ''
+        candidate = header_token or form_token
+        if not token or not candidate or not secrets.compare_digest(token, candidate):
+            return jsonify(error='Sessão expirada. Atualize a página e tente novamente.'), 403
+
 @app.errorhandler(InputError)
 def invalid(e): return jsonify(error=str(e)), 400
+
 @app.errorhandler(IntegrityError)
 def conflict(e): return jsonify(error='Esse nome já existe ou o registro está em uso.'), 409
+
 @app.errorhandler(413)
-def oversized(e): return jsonify(error='Formulário muito grande.'), 413
+def oversized(e): return jsonify(error='Arquivo ou formulário muito grande (limite 16MB).'), 413
+
 @app.errorhandler(500)
 def failed(e): return jsonify(error='Não foi possível concluir. Tente novamente.'), 500
-# Timings include database statements and commit; no request bodies or SQL are logged.
+
 @app.before_request
 def timing_start():
     g.started = time.perf_counter()
@@ -227,28 +384,595 @@ def timing_finish(response):
     if hasattr(g, 'started'):
         total = (time.perf_counter() - g.started) * 1000
         response.headers['Server-Timing'] = f'api;dur={total:.2f}, db;dur={g.db_ms:.2f}'
-        app.logger.info('request route=%s method=%s status=%s api_ms=%.2f db_ms=%.2f queries=%s',
-                        request.url_rule.rule if request.url_rule else 'unknown', request.method,
-                        response.status_code, total, g.db_ms, g.db_queries)
     response.headers['Cache-Control'] = 'no-store'
     return response
 
+# Serve static uploaded files
+@app.route('/api/evolution/photo/<path:filename>')
+def serve_evolution_photo(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+# ---------------------------------------------------------------------------
+# API Routes: Health, Auth & System Info
+# ---------------------------------------------------------------------------
+@app.get('/api/health')
+def health():
+    with engine.connect() as c: c.execute(text('SELECT 1'))
+    return jsonify(status='ok', version=VERSION, is_termux=IS_TERMUX)
+
+@app.get('/api/auth')
+def auth():
+    if 'csrf' not in session: session['csrf'] = secrets.token_hex(32)
+    session['user_id'] = 1
+    return jsonify(
+        csrf=session['csrf'],
+        authenticated=True,
+        single_user=True,
+        version=VERSION,
+        user=dict(id=1, name='Atleta')
+    )
+
+@app.post('/api/logout')
+def logout():
+    # Modo monousuário: renova o token CSRF
+    session['csrf'] = secrets.token_hex(32)
+    return jsonify(ok=True)
+
+# ---------------------------------------------------------------------------
+# API Routes: Biometria e Peso Corporal com Deltas (PONTO 4)
+# ---------------------------------------------------------------------------
+@app.get('/api/metrics/weight')
+@authenticated
+def metrics_weight_list():
+    with DB() as db:
+        rows = list(db.scalars(select(BodyMetric).order_by(BodyMetric.recorded_at.asc())))
+        result = []
+        prev_weight = None
+        for r in rows:
+            w = float(r.weight)
+            delta = round(w - prev_weight, 2) if prev_weight is not None else 0.0
+            result.append(dict(
+                id=r.id,
+                weight=w,
+                delta=delta,
+                notes=r.notes or '',
+                recorded_at=r.recorded_at
+            ))
+            prev_weight = w
+        return jsonify(list(reversed(result)))
+
+@app.post('/api/metrics/weight')
+@authenticated
+def metrics_weight_save():
+    d = data()
+    try:
+        w = float(Decimal(str(d.get('weight'))))
+        if not 20 <= w <= 500: raise ValueError()
+    except (ValueError, TypeError, InvalidOperation):
+        raise InputError('Peso: informe um valor numérico válido entre 20 e 500 kg.')
+    
+    rec_date = (d.get('recorded_at') or now().strftime('%Y-%m-%d')).strip()[:10]
+    try:
+        datetime.strptime(rec_date, '%Y-%m-%d')
+    except ValueError:
+        raise InputError('Data inválida (formato esperado AAAA-MM-DD).')
+    
+    note_text = notes(d)
+    with DB.begin() as db:
+        existing = db.scalar(select(BodyMetric).where(BodyMetric.recorded_at == rec_date))
+        if existing:
+            existing.weight = w
+            existing.notes = note_text
+            metric = existing
+        else:
+            metric = BodyMetric(weight=w, notes=note_text, recorded_at=rec_date)
+            db.add(metric)
+        db.flush()
+        return jsonify(id=metric.id, weight=float(metric.weight), recorded_at=metric.recorded_at, notes=metric.notes)
+
+@app.delete('/api/metrics/weight/<int:id>')
+@authenticated
+def metrics_weight_delete(id):
+    with DB.begin() as db:
+        m = found(db, BodyMetric, id)
+        db.delete(m)
+    return jsonify(ok=True)
+
+# ---------------------------------------------------------------------------
+# API Routes: Galeria de Fotos de Evolução Física (PONTO 2)
+# ---------------------------------------------------------------------------
+@app.get('/api/evolution/photos')
+@authenticated
+def evolution_photos_list():
+    with DB() as db:
+        photos = list(db.scalars(select(EvolutionPhoto).order_by(EvolutionPhoto.taken_at.desc(), EvolutionPhoto.id.desc())))
+        return jsonify([dict(
+            id=p.id,
+            photo_path=p.photo_path,
+            angle=p.angle,
+            taken_at=p.taken_at,
+            metric_id=p.metric_id
+        ) for p in photos])
+
+@app.post('/api/evolution/photos')
+@authenticated
+def evolution_photos_upload():
+    if 'photo' not in request.files:
+        raise InputError('Selecione uma foto para enviar.')
+    photo_file = request.files['photo']
+    if not photo_file.filename:
+        raise InputError('Arquivo inválido.')
+    
+    angle = (request.form.get('angle') or 'frontal').strip().lower()
+    if angle not in ('frontal', 'costas', 'lateral', 'outro'):
+        angle = 'frontal'
+    
+    taken_at = (request.form.get('taken_at') or now().strftime('%Y-%m-%d')).strip()[:10]
+    metric_id_val = request.form.get('metric_id')
+    metric_id = int(metric_id_val) if metric_id_val and str(metric_id_val).isdigit() else None
+
+    try:
+        saved_path = compress_and_save_photo(photo_file)
+    except Exception as e:
+        app.logger.warning("Falha na compressão da foto: %s", e)
+        raise InputError('Não foi possível processar a imagem.')
+
+    with DB.begin() as db:
+        p = EvolutionPhoto(photo_path=saved_path, angle=angle, taken_at=taken_at, metric_id=metric_id)
+        db.add(p)
+        db.flush()
+        return jsonify(id=p.id, photo_path=p.photo_path, angle=p.angle, taken_at=p.taken_at)
+
+@app.delete('/api/evolution/photos/<int:id>')
+@authenticated
+def evolution_photos_delete(id):
+    with DB.begin() as db:
+        p = found(db, EvolutionPhoto, id)
+        filename = os.path.basename(p.photo_path)
+        disk_file = os.path.join(UPLOAD_FOLDER, filename)
+        if os.path.exists(disk_file):
+            try: os.remove(disk_file)
+            except Exception: pass
+        db.delete(p)
+    return jsonify(ok=True)
+
+# ---------------------------------------------------------------------------
+# API Routes: Catálogo Anatômico de Exercícios (PONTO 8 e PONTO 9)
+# ---------------------------------------------------------------------------
+def ex_dict(e):
+    return dict(id=e.id, name=e.name, muscle_group=e.muscle_group or 'outro', equipment=e.equipment, custom=e.custom)
+
+@app.get('/api/exercises')
+@authenticated
+def exercises():
+    muscle = request.args.get('muscle', '').strip().lower()
+    with DB() as db:
+        query = select(Exercise)
+        if muscle and muscle in MUSCLE_GROUPS:
+            query = query.where(Exercise.muscle_group == muscle)
+        rows = db.scalars(query.order_by(Exercise.muscle_group, Exercise.name)).all()
+        return jsonify([ex_dict(e) for e in rows])
+
+catalog_lock = Lock()
+
+@app.route('/api/exercises', methods=['POST'])
+@app.route('/api/exercises/<int:id>', methods=['PUT', 'DELETE'])
+@authenticated
+def exercise_edit(id=None):
+    with catalog_lock, DB.begin() as db:
+        e = found(db, Exercise, id) if id else Exercise(custom=True)
+        if request.method == 'DELETE':
+            if not e.custom:
+                raise InputError('Exercícios do catálogo padrão não podem ser excluídos.')
+            if db.scalar(select(RoutineItem.id).where(RoutineItem.exercise_id == id).limit(1)):
+                raise InputError('Remova o exercício de todas as rotinas antes de excluir.')
+            for w in db.scalars(select(WorkoutItem).where(WorkoutItem.exercise_id == id)):
+                w.exercise_id = None
+            db.delete(e)
+            return jsonify(ok=True)
+
+        d = data()
+        e.name = string(d.get('name'), 'Nome')
+        group = (d.get('muscle_group') or d.get('muscle') or 'outro').strip().lower()
+        if group not in MUSCLE_GROUPS:
+            group = 'outro'
+        e.muscle_group = group
+        e.equipment = string(d.get('equipment', ''), 'Equipamento', 100) if d.get('equipment') else ''
+        db.add(e)
+        db.flush()
+        return jsonify(ex_dict(e))
+
+# ---------------------------------------------------------------------------
+# API Routes: Rotinas Anatômicas (PONTO 8 e PONTO 9)
+# ---------------------------------------------------------------------------
+def routine_dict(r):
+    return dict(
+        id=r.id,
+        name=r.name,
+        target_muscle_groups=r.target_muscle_groups or '',
+        day_of_week=r.day_of_week,
+        items=[dict(
+            exercise_id=i.exercise_id,
+            name=i.exercise.name if i.exercise else 'Exercício',
+            muscle_group=i.exercise.muscle_group if i.exercise else 'outro',
+            sets=i.sets,
+            reps=i.reps,
+            rest=i.rest,
+            target_reps=i.target_reps
+        ) for i in r.items]
+    )
+
+def set_routine(db, r, d):
+    r.name = string(d.get('name'), 'Nome da rotina')
+    r.target_muscle_groups = (d.get('target_muscle_groups') or '').strip().lower()[:255]
+    r.day_of_week = d.get('day_of_week') if isinstance(d.get('day_of_week'), int) else None
+    items = d.get('items')
+    if not isinstance(items, list) or not 1 <= len(items) <= 25:
+        raise InputError('A rotina deve ter entre 1 e 25 exercícios.')
+    r.items.clear()
+    for pos, i in enumerate(items):
+        if not isinstance(i, dict): raise InputError('Exercício inválido.')
+        ex = found(db, Exercise, integer(i.get('exercise_id'), 'Exercício', 1, 1000000))
+        r.items.append(RoutineItem(
+            exercise=ex,
+            position=pos,
+            sets=integer(i.get('sets'), 'Séries', 1, 20),
+            reps=integer(i.get('reps'), 'Repetições', 1, 1000),
+            rest=integer(i.get('rest'), 'Descanso', 0, 600),
+            target_reps=str(i.get('target_reps') or f"{i.get('reps', 10)}")[:20]
+        ))
+
+@app.get('/api/routines')
+@authenticated
+def routines():
+    with DB() as db:
+        rows = db.scalars(select(Routine).options(
+            selectinload(Routine.items).selectinload(RoutineItem.exercise)
+        ).order_by(Routine.id)).all()
+        return jsonify([routine_dict(r) for r in rows])
+
+@app.route('/api/routines', methods=['POST'])
+@app.route('/api/routines/<int:id>', methods=['PUT', 'DELETE'])
+@authenticated
+def routine_edit(id=None):
+    with DB.begin() as db:
+        r = found(db, Routine, id) if id else Routine()
+        if request.method == 'DELETE':
+            db.delete(r)
+            return jsonify(ok=True)
+        set_routine(db, r, data())
+        db.add(r)
+        db.flush()
+        return jsonify(routine_dict(r))
+
+# ---------------------------------------------------------------------------
+# API Routes: Execução de Treinos & Ergonomia (Auto-preenchimento de Cargas)
+# ---------------------------------------------------------------------------
+def workout_dict(w):
+    return dict(
+        id=w.id,
+        routine_name=w.routine_name,
+        routine_id=w.routine_id,
+        started_at=w.started_at.replace(tzinfo=tz).isoformat(),
+        finished_at=w.finished_at.replace(tzinfo=tz).isoformat() if w.finished_at else None,
+        session_date=w.session_date or w.started_at.strftime('%Y-%m-%d'),
+        notes=w.notes,
+        items=[dict(
+            id=i.id,
+            exercise_id=i.exercise_id,
+            name=i.name,
+            rest=i.rest,
+            notes=i.notes,
+            sets=[dict(
+                id=s.id,
+                position=s.position,
+                reps=s.reps,
+                load=float(s.load),
+                done=s.done,
+                rpe=float(s.rpe) if s.rpe else None
+            ) for s in i.sets]
+        ) for i in w.items]
+    )
+
+@app.get('/api/workouts')
+@authenticated
+def workouts():
+    month = request.args.get('month', '')
+    try:
+        start = datetime.strptime(month, '%Y-%m')
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    except ValueError:
+        raise InputError('Mês inválido.')
+    with DB() as db:
+        ws = db.scalars(select(Workout).options(
+            selectinload(Workout.items).selectinload(WorkoutItem.sets)
+        ).where(
+            Workout.finished_at.is_not(None),
+            Workout.started_at >= start,
+            Workout.started_at < end
+        ).order_by(Workout.started_at.desc())).all()
+        return jsonify([workout_dict(w) for w in ws])
+
+@app.get('/api/workouts/active')
+@authenticated
+def active():
+    with DB() as db:
+        w = db.scalar(select(Workout).options(
+            selectinload(Workout.items).selectinload(WorkoutItem.sets)
+        ).where(Workout.finished_at.is_(None)).order_by(Workout.id.desc()))
+        return jsonify(workout_dict(w) if w else None)
+
+workout_lock = Lock()
+
+@app.post('/api/workouts')
+@authenticated
+def start_workout():
+    with workout_lock, DB.begin() as db:
+        if db.scalar(select(Workout.id).where(Workout.finished_at.is_(None)).limit(1)):
+            raise InputError('Já existe um treino em andamento. Retome ou descarte esse treino.')
+        d = data()
+        r = found(db, Routine, integer(d.get('routine_id'), 'Rotina', 1, 1000000))
+        entry = found(db, Schedule, integer(d['schedule_id'], 'Agendamento', 1, 1000000)) if d.get('schedule_id') else None
+        if entry and (entry.routine_id != r.id or entry.workout_id):
+            raise InputError('Agendamento já iniciado ou rotina inválida.')
+
+        current_time = now()
+        today_str = current_time.strftime('%Y-%m-%d')
+        w = Workout(
+            routine_name=r.name,
+            routine_id=r.id,
+            started_at=current_time,
+            session_date=today_str,
+            notes=''
+        )
+
+        # Pré-preenchimento inteligente de cargas e repetições anteriores para ergonomia
+        for pos, i in enumerate(r.items):
+            last_load = 0.0
+            last_reps = i.reps
+            if i.exercise_id:
+                last_set = db.execute(
+                    select(WorkoutSet.load, WorkoutSet.reps)
+                    .join(WorkoutItem, WorkoutItem.id == WorkoutSet.item_id)
+                    .join(Workout, Workout.id == WorkoutItem.workout_id)
+                    .where(WorkoutItem.exercise_id == i.exercise_id, Workout.finished_at.is_not(None), WorkoutSet.done.is_(True))
+                    .order_by(Workout.started_at.desc(), WorkoutSet.position.desc())
+                    .limit(1)
+                ).first()
+                if last_set:
+                    last_load = float(last_set[0])
+                    last_reps = int(last_set[1])
+
+            item = WorkoutItem(
+                exercise_id=i.exercise_id,
+                name=i.exercise.name if i.exercise else 'Exercício',
+                position=pos,
+                rest=i.rest,
+                notes='',
+                sets=[WorkoutSet(position=n, reps=last_reps, load=last_load, done=False) for n in range(i.sets)]
+            )
+            w.items.append(item)
+
+        db.add(w)
+        db.flush()
+        if entry: entry.workout_id = w.id
+        return jsonify(workout_dict(w))
+
+@app.route('/api/workouts/<int:id>', methods=['GET', 'PUT', 'DELETE'])
+@authenticated
+def workout_edit(id):
+    with workout_lock, DB.begin() as db:
+        w = db.scalar(select(Workout).options(
+            selectinload(Workout.items).selectinload(WorkoutItem.sets)
+        ).where(Workout.id == id))
+        if w is None: raise InputError('Registro não encontrado.')
+        if request.method == 'GET': return jsonify(workout_dict(w))
+        if request.method == 'DELETE':
+            for entry in db.scalars(select(Schedule).where(Schedule.workout_id == w.id)):
+                entry.workout_id = None
+            db.delete(w)
+            return jsonify(ok=True)
+        if w.finished_at: raise InputError('Treino já finalizado.')
+
+        d = data()
+        w.notes = notes(d)
+        items = d.get('items')
+        if not isinstance(items, list) or len(items) != len(w.items):
+            raise InputError('Exercícios inválidos.')
+        for saved, edit in zip(w.items, items):
+            if not isinstance(edit, dict) or edit.get('id') != saved.id:
+                raise InputError('Exercício inválido.')
+            saved.notes = notes(edit)
+            ss = edit.get('sets')
+            if not isinstance(ss, list) or len(ss) != len(saved.sets):
+                raise InputError('Séries inválidas.')
+            for s, v in zip(saved.sets, ss):
+                if not isinstance(v, dict) or v.get('id') != s.id or not isinstance(v.get('done'), bool):
+                    raise InputError('Série inválida.')
+                s.reps = integer(v.get('reps'), 'Repetições', 0, 1000)
+                s.load = load_value(v.get('load'))
+                s.done = v['done']
+                if v.get('rpe') is not None and str(v.get('rpe')).strip():
+                    try: s.rpe = float(v.get('rpe'))
+                    except Exception: s.rpe = None
+                if s.done and s.reps == 0:
+                    raise InputError('Série concluída precisa ter repetições.')
+
+        if d.get('finish'):
+            if not any(s.done for i in w.items for s in i.sets):
+                raise InputError('Conclua pelo menos uma série antes de finalizar.')
+            w.finished_at = now()
+
+        db.flush()
+        return jsonify(workout_dict(w))
+
+# ---------------------------------------------------------------------------
+# API Routes: Histórico de Séries e Cargas
+# ---------------------------------------------------------------------------
+@app.get('/api/history/<int:id>')
+@authenticated
+def history(id):
+    with DB() as db:
+        rows = db.execute(
+            select(Workout.started_at, WorkoutItem.name, WorkoutSet.reps, WorkoutSet.load)
+            .join(WorkoutItem, WorkoutItem.workout_id == Workout.id)
+            .join(WorkoutSet, WorkoutSet.item_id == WorkoutItem.id)
+            .where(WorkoutItem.exercise_id == id, Workout.finished_at.is_not(None), WorkoutSet.done.is_(True))
+            .order_by(Workout.started_at, WorkoutSet.position)
+        ).all()
+        return jsonify([dict(
+            date=r[0].replace(tzinfo=tz).isoformat(),
+            name=r[1],
+            reps=r[2],
+            load=float(r[3])
+        ) for r in rows])
+
+@app.get('/api/history')
+@authenticated
+def history_batch():
+    values = request.args.get('ids', '').split(',')
+    ids = list({integer(v, 'Exercício', 1, 1000000) for v in values if v})
+    if len(ids) > 25: raise InputError('Máximo de 25 exercícios.')
+    with DB() as db:
+        rows = db.execute(
+            select(WorkoutItem.exercise_id, Workout.started_at, WorkoutItem.name, WorkoutSet.reps, WorkoutSet.load)
+            .join(WorkoutItem, WorkoutItem.workout_id == Workout.id)
+            .join(WorkoutSet, WorkoutSet.item_id == WorkoutItem.id)
+            .where(WorkoutItem.exercise_id.in_(ids), Workout.finished_at.is_not(None), WorkoutSet.done.is_(True))
+            .order_by(Workout.started_at, WorkoutSet.position)
+        ).all()
+        result = {i: [] for i in ids}
+        for r in rows:
+            result[r[0]].append(dict(
+                date=r[1].replace(tzinfo=tz).isoformat(),
+                name=r[2],
+                reps=r[3],
+                load=float(r[4])
+            ))
+        return jsonify(result)
+
+# ---------------------------------------------------------------------------
+# API Routes: Calendário Inteligente e Matriz Temporal (PONTO 7)
+# ---------------------------------------------------------------------------
+@app.get('/api/calendar/month')
+@authenticated
+def calendar_month():
+    month = request.args.get('month', now().strftime('%Y-%m'))
+    try:
+        start = datetime.strptime(month, '%Y-%m')
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    except ValueError:
+        raise InputError('Mês inválido.')
+    with DB() as db:
+        ws = list(db.scalars(select(Workout).where(
+            Workout.started_at >= start,
+            Workout.started_at < end,
+            Workout.finished_at.is_not(None)
+        )))
+        scs = list(db.scalars(select(Schedule).where(
+            Schedule.scheduled_at >= start,
+            Schedule.scheduled_at < end
+        )))
+        trained_dates = {w.started_at.strftime('%Y-%m-%d') for w in ws}
+        scheduled_dates = {s.scheduled_at.strftime('%Y-%m-%d') for s in scs if not s.workout_id}
+        return jsonify(
+            month=month,
+            trained_dates=list(trained_dates),
+            scheduled_dates=list(scheduled_dates)
+        )
+
+@app.get('/api/calendar/day/<date_str>')
+@authenticated
+def calendar_day_state(date_str):
+    try:
+        target_date = datetime.strptime(date_str[:10], '%Y-%m-%d').date()
+    except ValueError:
+        raise InputError('Data inválida (formato esperado AAAA-MM-DD).')
+    
+    today = today_date()
+    is_past = target_date < today
+    is_today = target_date == today
+    is_future = target_date > today
+
+    start_dt = datetime.combine(target_date, datetime.min.time())
+    end_dt = datetime.combine(target_date, datetime.max.time())
+
+    with DB() as db:
+        workouts = list(db.scalars(select(Workout).options(
+            selectinload(Workout.items).selectinload(WorkoutItem.sets)
+        ).where(
+            Workout.started_at >= start_dt,
+            Workout.started_at <= end_dt
+        ).order_by(Workout.id.desc())))
+
+        finished_workout = next((w for w in workouts if w.finished_at), None)
+        active_workout = next((w for w in workouts if not w.finished_at), None)
+
+        schedules = list(db.scalars(select(Schedule).where(
+            Schedule.scheduled_at >= start_dt,
+            Schedule.scheduled_at <= end_dt
+        )))
+
+        # Matriz de Estados Temporais (RF07)
+        if is_past:
+            state = 'past_trained' if finished_workout else 'past_rest'
+            can_schedule = False
+        elif is_today:
+            if finished_workout:
+                state = 'today_trained'
+                can_schedule = False
+            elif active_workout or schedules:
+                state = 'today_ready'
+                can_schedule = False
+            else:
+                state = 'today_idle'
+                can_schedule = True
+        else: # Futuro
+            state = 'future_scheduled' if schedules else 'future_empty'
+            can_schedule = True
+
+        chosen_workout = finished_workout or active_workout
+
+        return jsonify(
+            date=date_str[:10],
+            state=state,
+            is_past=is_past,
+            is_today=is_today,
+            is_future=is_future,
+            can_schedule=can_schedule,
+            workout=workout_dict(chosen_workout) if chosen_workout else None,
+            schedules=[dict(
+                id=s.id,
+                routine_id=s.routine_id,
+                routine_name=s.routine_name,
+                scheduled_at=s.scheduled_at.strftime('%Y-%m-%dT%H:%M')
+            ) for s in schedules]
+        )
+
+# Agendamentos legados para compatibilidade
 @app.get('/api/schedules')
 @authenticated
-def schedules():
+def schedules_list():
+    month = request.args.get('month', '')
     try:
-        start = datetime.strptime(request.args.get('month', ''), '%Y-%m')
+        start = datetime.strptime(month, '%Y-%m')
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    except ValueError: raise InputError('Mês inválido.')
+    except ValueError:
+        raise InputError('Mês inválido.')
     with DB() as db:
-        entries = db.scalars(select(Schedule).where(Schedule.scheduled_at >= start,
-                            Schedule.scheduled_at < end).order_by(Schedule.scheduled_at))
-        return jsonify([dict(id=e.id, routine_id=e.routine_id, routine_name=e.routine_name,
-                       scheduled_at=e.scheduled_at.replace(tzinfo=tz).isoformat(),
-                       workout_id=e.workout_id, status=('concluído' if e.workout_id and
-                       (w := db.get(Workout, e.workout_id)) and w.finished_at else
-                       'em andamento' if e.workout_id and db.get(Workout, e.workout_id) else 'agendado'))
-                       for e in entries])
+        entries = db.scalars(select(Schedule).where(
+            Schedule.scheduled_at >= start,
+            Schedule.scheduled_at < end
+        ).order_by(Schedule.scheduled_at)).all()
+        return jsonify([dict(
+            id=e.id,
+            routine_id=e.routine_id,
+            routine_name=e.routine_name,
+            scheduled_at=e.scheduled_at.replace(tzinfo=tz).isoformat(),
+            workout_id=e.workout_id,
+            status=('concluído' if e.workout_id and (w := db.get(Workout, e.workout_id)) and w.finished_at else
+                    'em andamento' if e.workout_id and db.get(Workout, e.workout_id) else 'agendado')
+        ) for e in entries])
 
 schedule_lock = Lock()
 
@@ -258,13 +982,20 @@ def schedule_create():
     d = data()
     try:
         stamp = datetime.strptime(d.get('scheduled_at', ''), '%Y-%m-%dT%H:%M')
-    except (ValueError, TypeError): raise InputError('Informe uma data e horário válidos.')
+    except (ValueError, TypeError):
+        raise InputError('Informe uma data e horário válidos.')
+    
+    # Bloqueio de agendamento no passado (RF07)
+    if stamp < now().replace(second=0, microsecond=0):
+        raise InputError('Não é permitido agendar treinos em datas passadas.')
+
     with schedule_lock, DB.begin() as db:
         r = found(db, Routine, integer(d.get('routine_id'), 'Rotina', 1, 1000000))
         if db.scalar(select(Schedule.id).where(Schedule.routine_id == r.id, Schedule.scheduled_at == stamp)):
             raise InputError('Esta rotina já está agendada neste horário.')
         entry = Schedule(routine_id=r.id, routine_name=r.name, scheduled_at=stamp)
-        db.add(entry); db.flush()
+        db.add(entry)
+        db.flush()
         return jsonify(id=entry.id)
 
 @app.delete('/api/schedules/<int:id>')
@@ -274,327 +1005,13 @@ def schedule_delete(id):
         db.delete(found(db, Schedule, id))
     return jsonify(ok=True)
 
-@app.get('/api/health')
-def health():
-    with engine.connect() as c: c.execute(text('SELECT 1'))
-    return jsonify(status='ok')
-@app.get('/api/auth')
-def auth():
-    if 'csrf' not in session: session['csrf'] = secrets.token_hex(32)
-    with DB() as db:
-        a = db.get(Account, 1)
-        return jsonify(csrf=session['csrf'], authenticated=bool(a and session.get('auth') == a.version), configured=bool(a))
-# Um único worker atende este usuário; o limite é compartilhado pelas threads.
-login_lock = Lock()
-failures = []
-@app.post('/api/login')
-def login():
-    password = data().get('password')
-    if not isinstance(password, str) or len(password) > 256: raise InputError('Senha inválida.')
-    with login_lock:
-        stamp = time.monotonic()
-        failures[:] = [t for t in failures if stamp - t < 300]
-        if len(failures) >= 10: return jsonify(error='Muitas tentativas. Aguarde cinco minutos.'), 429
-        with DB.begin() as db:
-            a = db.get(Account, 1)
-            if not a: return jsonify(error='Configure a senha inicial no servidor. Consulte o README.'), 503
-            try: ph.verify(a.password_hash, password)
-            except VerificationError:
-                failures.append(stamp)
-                return jsonify(error='Senha incorreta.'), 401
-            if ph.check_needs_rehash(a.password_hash): a.password_hash = ph.hash(password)
-            session.clear(); session.permanent = True
-            session.update(auth=a.version, csrf=secrets.token_hex(32))
-            failures.clear()
-    return jsonify(ok=True, csrf=session['csrf'])
-@app.post('/api/logout')
-def logout(): session.clear(); return jsonify(ok=True)
-
-catalog_lock = Lock()
-
-def ex_dict(e): return dict(id=e.id, name=e.name, muscle=e.muscle, custom=e.custom)
-@app.get('/api/exercises')
-@authenticated
-def exercises():
-    with DB() as db: return jsonify([ex_dict(e) for e in db.scalars(select(Exercise).order_by(Exercise.muscle, Exercise.name))])
-@app.route('/api/exercises', methods=['POST'])
-@app.route('/api/exercises/<int:id>', methods=['PUT', 'DELETE'])
-@authenticated
-def exercise_edit(id=None):
-    with catalog_lock, DB.begin() as db:
-        e = found(db, Exercise, id) if id else Exercise(custom=True)
-        if request.method == 'DELETE' and not e.custom: raise InputError('O catálogo inicial pode ser editado, mas não excluído.')
-        if request.method == 'DELETE':
-            if db.scalar(select(RoutineItem.id).where(RoutineItem.exercise_id == id).limit(1)):
-                raise InputError('Remova o exercício das rotinas antes de excluir.')
-            for w in db.scalars(select(WorkoutItem).where(WorkoutItem.exercise_id == id)): w.exercise_id = None
-            db.delete(e); return jsonify(ok=True)
-        d=data(); e.name=string(d.get('name'), 'Nome'); e.muscle=string(d.get('muscle'), 'Grupo muscular', 60)
-        if any(other.id != e.id and gemini.normalize(other.name) == gemini.normalize(e.name) for other in db.scalars(select(Exercise))):
-            raise InputError('Um exercício equivalente já existe no catálogo. Use o existente.')
-        db.add(e); db.flush(); return jsonify(ex_dict(e))
-
-def routine_dict(r):
-    return dict(id=r.id, name=r.name, goal=r.goal, items=[dict(exercise_id=i.exercise_id,
-        name=i.exercise.name, sets=i.sets, reps=i.reps, rest=i.rest) for i in r.items])
-def set_routine(db, r, d):
-    r.name=string(d.get('name'), 'Nome'); r.goal=goal(d)
-    items=d.get('items')
-    if not isinstance(items, list) or not 1 <= len(items) <= 25: raise InputError('Inclua de 1 a 25 exercícios.')
-    r.items.clear()
-    for pos,i in enumerate(items):
-        if not isinstance(i, dict): raise InputError('Exercício inválido.')
-        ex=found(db, Exercise, integer(i.get('exercise_id'), 'Exercício', 1, 1000000))
-        r.items.append(RoutineItem(exercise=ex, position=pos, sets=integer(i.get('sets'), 'Séries',1,20),
-             reps=integer(i.get('reps'),'Repetições',1,1000), rest=integer(i.get('rest'),'Descanso',0,600)))
-@app.get('/api/routines')
-@authenticated
-def routines():
-    with DB() as db: return jsonify([routine_dict(r) for r in db.scalars(select(Routine).options(selectinload(Routine.items).selectinload(RoutineItem.exercise)).order_by(Routine.id))])
-@app.route('/api/routines', methods=['POST'])
-@app.route('/api/routines/<int:id>', methods=['PUT','DELETE'])
-@authenticated
-def routine_edit(id=None):
-    with DB.begin() as db:
-        r=found(db,Routine,id) if id else Routine()
-        if request.method == 'DELETE': db.delete(r); return jsonify(ok=True)
-        set_routine(db,r,data()); db.add(r); db.flush(); return jsonify(routine_dict(r))
-@app.post('/api/suggest')
-@authenticated
-def suggest():
-    d=data(); g=goal(d); days=integer(d.get('days'),'Dias',1,6); minutes=integer(d.get('minutes'),'Tempo',15,120)
-    templates=[['Agachamento','Supino reto','Remada baixa','Mesa flexora','Desenvolvimento','Abdominal'],
-               ['Leg press','Supino inclinado','Puxada frontal','Elevação de panturrilha','Rosca direta','Tríceps na polia']]
-    if days >= 4:
-        templates=[['Supino reto','Remada baixa','Desenvolvimento','Rosca direta','Tríceps na polia'],
-                   ['Agachamento','Mesa flexora','Leg press','Elevação de panturrilha','Abdominal']]
-    sets,reps,rest=(4,5,150) if g=='força' else (3,10,90) if g=='hipertrofia' else (2,15,45)
-    count=max(2,min(6, int(minutes // (sets*(1+rest/60)+1))))
-    with DB() as db:
-        catalog=list(db.scalars(select(Exercise).order_by(Exercise.id)))
-        by_name={e.name:e for e in catalog}
-        seeds=[n for names in CATALOG.values() for n in names]
-        for e in catalog:
-            if not e.custom and 1 <= e.id <= len(seeds): by_name[seeds[e.id-1]]=e
-        plans=[]
-        for day in range(days):
-            names=templates[day%2][:count]
-            if g in ('condicionamento','emagrecimento') and count >= 3: names=names[:-1]+['Bicicleta ergométrica']
-            plans.append(dict(name=f'Treino {chr(65+day)} — {g}',goal=g,items=[dict(exercise_id=by_name[n].id,
-              name=by_name[n].name,sets=sets,reps=reps,rest=rest) for n in names if n in by_name]))
-    return jsonify(routines=plans, note='Modelo inicial editável. Séries e repetições são contagens; para bicicleta/esteira, use as observações para registrar duração. Ajuste os exercícios à sua experiência e ao tempo real da sessão.')
-
-@app.errorhandler(gemini.GeminiError)
-def gemini_failed(e): return jsonify(error=str(e)), e.status
-
-def ai_enabled(db):
-    setting = db.get(AISettings, 1)
-    return bool(setting and setting.enabled)
-
-@app.route('/api/ai/settings', methods=['GET', 'PUT'])
-@authenticated
-def ai_settings():
-    with DB.begin() as db:
-        if request.method == 'PUT':
-            enabled = data().get('enabled')
-            if not isinstance(enabled, bool): raise InputError('Escolha habilitar ou desativar a integração.')
-            setting = db.get(AISettings, 1)
-            if not setting:
-                setting = AISettings(id=1); db.add(setting)
-            setting.enabled = enabled
-            db.flush()
-        return jsonify(configured=gemini.configured(), enabled=ai_enabled(db), model=gemini.MODEL)
-
-def ai_profile(d):
-    if d.get('consent') is not True: raise InputError('Autorize o envio dos campos informados à Google antes de gerar.')
-    experience = d.get('experience')
-    if experience not in ('iniciante', 'intermediário', 'avançado'): raise InputError('Escolha a experiência.')
-    profile = dict(goal=goal(d), experience=experience, days=integer(d.get('days'),'Dias',1,6),
-                   minutes=integer(d.get('minutes'),'Tempo',15,120), equipment=string(d.get('equipment'),'Equipamentos',500))
-    limitations = d.get('limitations', '')
-    if not isinstance(limitations, str) or len(limitations) > 500: raise InputError('Limitações: máximo de 500 caracteres.')
-    profile['limitations'] = limitations.strip()
-    for name, label, lo, hi in [('weight','Peso',20,500), ('height','Altura',80,250)]:
-        value = d.get(name)
-        if value is None or value == '': continue
-        if isinstance(value, bool) or not isinstance(value, (float,int)) or not math.isfinite(value) or not lo <= value <= hi:
-            raise InputError(f'{label}: informe de {lo} a {hi}, ou deixe vazio.')
-        profile[name] = value
-    return profile
-
-def validate_ai_routine(d, g):
-    if not isinstance(d, dict) or set(d) != {'name', 'items'}: raise InputError('Rascunho inválido: campos não permitidos.')
-    name = string(d.get('name'), 'Nome da rotina')
-    if not gemini.safe_name(name): raise InputError('Rascunho recusado: instrução médica, de carga ou texto não permitido.')
-    items = d.get('items')
-    if not isinstance(items, list) or not 1 <= len(items) <= 12: raise InputError('Rascunho deve ter de 1 a 12 exercícios.')
-    result = dict(name=name, goal=g, items=[])
-    seen = set()
-    for i in items:
-        if not isinstance(i, dict) or set(i) != {'name','muscle','sets','reps','rest'}:
-            raise InputError('Exercício inválido: não são aceitos campos de carga ou instruções clínicas.')
-        name = string(i.get('name'), 'Nome do exercício')
-        key = gemini.normalize(name)
-        if not key or not gemini.safe_name(name): raise InputError('Nome de exercício não permitido.')
-        if key in seen: raise InputError('O rascunho repete um exercício equivalente. Revise antes de salvar.')
-        seen.add(key)
-        if i.get('muscle') not in gemini.SCHEMA['properties']['routines']['items']['properties']['items']['items']['properties']['muscle']['enum']:
-            raise InputError('Grupo muscular não permitido no rascunho.')
-        values={}
-        for field, lo, hi in [('sets',1,6), ('reps',1,30), ('rest',0,300)]:
-            if type(i.get(field)) is not int: raise InputError('Contagens do rascunho devem ser inteiros.')
-            values[field] = integer(i[field], field, lo, hi)
-        result['items'].append(dict(name=name, muscle=i['muscle'], **values))
-    return result
-
-# Um usuário/worker. O limite local protege contra cliques repetidos; as cotas reais são da Google.
-ai_lock = Lock()
-ai_last_request = 0
-@app.post('/api/ai/suggest')
-@authenticated
-def ai_suggest():
-    global ai_last_request
-    profile = ai_profile(data())
-    if not gemini.configured(): raise gemini.GeminiError('Gemini não configurado para projeto gratuito. Use as sugestões locais ou crie rotinas manualmente.')
-    with DB() as db:
-        if not ai_enabled(db): raise InputError('Integração desativada. Habilite-a antes de enviar dados.')
-    if not ai_lock.acquire(blocking=False): raise gemini.GeminiError('Uma sugestão já está sendo gerada. Aguarde.',429)
-    try:
-        stamp = time.monotonic()
-        if stamp - ai_last_request < 60: raise gemini.GeminiError('Aguarde um minuto entre solicitações ao Gemini. O modo manual continua disponível.',429)
-        ai_last_request = stamp
-        raw = gemini.generate(profile)
-        try:
-            if not isinstance(raw,dict) or set(raw) != {'routines'} or not isinstance(raw['routines'],list) or len(raw['routines']) != profile['days']:
-                raise InputError('Quantidade de rotinas inválida.')
-            plans = [validate_ai_routine(r,profile['goal']) for r in raw['routines']]
-        except InputError:
-            raise gemini.GeminiError('A resposta do Gemini não passou na validação de rascunho. Nada foi salvo. Use o modo manual ou tente mais tarde.',502) from None
-        with DB() as db:
-            if not ai_enabled(db) or not gemini.configured(): raise InputError('Integração desativada durante a geração. O resultado foi descartado.')
-            existing = {gemini.normalize(e.name): e for e in db.scalars(select(Exercise).order_by(Exercise.id))}
-            for r in plans:
-                for i in r['items']:
-                    e = existing.get(gemini.normalize(i['name']))
-                    i['existing_id'] = e.id if e else None
-                    i['existing_name'] = e.name if e else None
-        return jsonify(routines=plans, note='Rascunho de IA: revise a adequação dos exercícios antes de salvar. Não inclui cargas, diagnóstico ou tratamento.')
-    finally: ai_lock.release()
-
-@app.post('/api/ai/import')
-@authenticated
-def ai_import():
-    d = data()
-    if d.get('reviewed') is not True: raise InputError('Revise e confirme o rascunho antes de salvar.')
-    r = validate_ai_routine(d.get('routine'),goal(d))
-    # Gravação ocorre exclusivamente nesta ação humana, em uma transação atômica.
-    with catalog_lock, DB.begin() as db:
-        existing = {gemini.normalize(e.name): e for e in db.scalars(select(Exercise).order_by(Exercise.id))}
-        items=[]
-        for i in r['items']:
-            key=gemini.normalize(i['name'])
-            e=existing.get(key)
-            if not e:
-                e=Exercise(name=i['name'],muscle=i['muscle'],custom=True)
-                db.add(e);db.flush();existing[key]=e
-            items.append(dict(exercise_id=e.id,sets=i['sets'],reps=i['reps'],rest=i['rest']))
-        routine=Routine()
-        set_routine(db,routine,dict(name=r['name'],goal=r['goal'],items=items))
-        db.add(routine);db.flush()
-        return jsonify(routine_dict(routine))
-
-def workout_dict(w):
-    return dict(id=w.id,routine_name=w.routine_name,started_at=w.started_at.replace(tzinfo=tz).isoformat(),
-      finished_at=w.finished_at.replace(tzinfo=tz).isoformat() if w.finished_at else None,notes=w.notes,
-      items=[dict(id=i.id,exercise_id=i.exercise_id,name=i.name,rest=i.rest,notes=i.notes,
-        sets=[dict(id=s.id,reps=s.reps,load=float(s.load),done=s.done) for s in i.sets]) for i in w.items])
-@app.get('/api/workouts')
-@authenticated
-def workouts():
-    month=request.args.get('month','')
-    try: start=datetime.strptime(month,'%Y-%m'); end=(start.replace(day=28)+timedelta(days=4)).replace(day=1)
-    except ValueError: raise InputError('Mês inválido.')
-    with DB() as db:
-        ws=db.scalars(select(Workout).options(selectinload(Workout.items).selectinload(WorkoutItem.sets)).where(Workout.finished_at.is_not(None),Workout.started_at>=start,Workout.started_at<end).order_by(Workout.started_at.desc()))
-        return jsonify([workout_dict(w) for w in ws])
-@app.get('/api/workouts/active')
-@authenticated
-def active():
-    with DB() as db:
-        w=db.scalar(select(Workout).options(selectinload(Workout.items).selectinload(WorkoutItem.sets)).where(Workout.finished_at.is_(None)).order_by(Workout.id.desc()))
-        return jsonify(workout_dict(w) if w else None)
-workout_lock = Lock()
-
-@app.post('/api/workouts')
-@authenticated
-def start_workout():
-    with workout_lock, DB.begin() as db:
-        if db.scalar(select(Workout.id).where(Workout.finished_at.is_(None)).limit(1)):
-            raise InputError('Já existe um treino em andamento. Retome ou descarte esse treino.')
-        d=data()
-        r=found(db,Routine,integer(d.get('routine_id'),'Rotina',1,1000000))
-        entry = found(db, Schedule, integer(d['schedule_id'], 'Agendamento', 1, 1000000)) if d.get('schedule_id') else None
-        if entry and (entry.routine_id != r.id or entry.workout_id): raise InputError('Agendamento já iniciado ou rotina inválida.')
-        w=Workout(routine_name=r.name,started_at=now(),notes='')
-        for pos,i in enumerate(r.items):
-            w.items.append(WorkoutItem(exercise_id=i.exercise_id,name=i.exercise.name,position=pos,rest=i.rest,notes='',
-              sets=[WorkoutSet(position=n,reps=i.reps,load=0,done=False) for n in range(i.sets)]))
-        db.add(w);db.flush()
-        if entry: entry.workout_id = w.id
-        return jsonify(workout_dict(w))
-@app.route('/api/workouts/<int:id>',methods=['GET','PUT','DELETE'])
-@authenticated
-def workout_edit(id):
-    with workout_lock, DB.begin() as db:
-        w=db.scalar(select(Workout).options(selectinload(Workout.items).selectinload(WorkoutItem.sets)).where(Workout.id==id))
-        if w is None: raise InputError('Registro não encontrado.')
-        if request.method=='GET': return jsonify(workout_dict(w))
-        if request.method=='DELETE':
-            for entry in db.scalars(select(Schedule).where(Schedule.workout_id == w.id)): entry.workout_id = None
-            db.delete(w); return jsonify(ok=True)
-        if w.finished_at: raise InputError('Treino já finalizado.')
-        d=data();w.notes=notes(d)
-        items=d.get('items')
-        if not isinstance(items,list) or len(items)!=len(w.items): raise InputError('Exercícios inválidos.')
-        for saved,edit in zip(w.items,items):
-            if not isinstance(edit,dict) or edit.get('id')!=saved.id: raise InputError('Exercício inválido.')
-            saved.notes=notes(edit)
-            ss=edit.get('sets')
-            if not isinstance(ss,list) or len(ss)!=len(saved.sets): raise InputError('Séries inválidas.')
-            for s,v in zip(saved.sets,ss):
-                if not isinstance(v,dict) or v.get('id')!=s.id or not isinstance(v.get('done'),bool): raise InputError('Série inválida.')
-                s.reps=integer(v.get('reps'),'Repetições',0,1000);s.load=load_value(v.get('load'));s.done=v['done']
-                if s.done and s.reps==0: raise InputError('Série concluída precisa ter repetições.')
-        if d.get('finish'):
-            if not any(s.done for i in w.items for s in i.sets): raise InputError('Conclua pelo menos uma série antes de finalizar.')
-            w.finished_at=now()
-        db.flush();return jsonify(workout_dict(w))
-@app.get('/api/history/<int:id>')
-@authenticated
-def history(id):
-    with DB() as db:
-        rows=db.execute(select(Workout.started_at,WorkoutItem.name,WorkoutSet.reps,WorkoutSet.load)
-          .join(WorkoutItem,WorkoutItem.workout_id==Workout.id).join(WorkoutSet,WorkoutSet.item_id==WorkoutItem.id)
-          .where(WorkoutItem.exercise_id==id,Workout.finished_at.is_not(None),WorkoutSet.done.is_(True))
-          .order_by(Workout.started_at,WorkoutSet.position)).all()
-        return jsonify([dict(date=r[0].replace(tzinfo=tz).isoformat(),name=r[1],reps=r[2],load=float(r[3])) for r in rows])
-
-@app.get('/api/history')
-@authenticated
-def history_batch():
-    values = request.args.get('ids', '').split(',')
-    ids = list({integer(v, 'Exercício', 1, 1000000) for v in values if v})
-    if len(ids) > 25: raise InputError('Máximo de 25 exercícios.')
-    with DB() as db:
-        rows=db.execute(select(WorkoutItem.exercise_id,Workout.started_at,WorkoutItem.name,WorkoutSet.reps,WorkoutSet.load)
-          .join(WorkoutItem,WorkoutItem.workout_id==Workout.id).join(WorkoutSet,WorkoutSet.item_id==WorkoutItem.id)
-          .where(WorkoutItem.exercise_id.in_(ids),Workout.finished_at.is_not(None),WorkoutSet.done.is_(True))
-          .order_by(Workout.started_at,WorkoutSet.position)).all()
-        result={id:[] for id in ids}
-        for r in rows: result[r[0]].append(dict(date=r[1].replace(tzinfo=tz).isoformat(),name=r[2],reps=r[3],load=float(r[4])))
-        return jsonify(result)
-
+# ---------------------------------------------------------------------------
+# API Routes: Notificações Web Push (RFC 8291 / 8292)
+# ---------------------------------------------------------------------------
 VAPID_PRIVATE_KEY_PATH = os.path.expanduser('~/.local/share/ritmo/vapid_private.pem')
+if IS_TERMUX:
+    VAPID_PRIVATE_KEY_PATH = '/data/data/com.termux/files/home/.local/share/ritmo/vapid_private.pem'
+
 def get_vapid_public_key():
     if not os.path.exists(VAPID_PRIVATE_KEY_PATH): return ''
     try:
@@ -605,12 +1022,13 @@ def get_vapid_public_key():
         raw_pub = v.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
         return base64.urlsafe_b64encode(raw_pub).decode().rstrip('=')
     except Exception as e:
-        app.logger.warning("Error loading VAPID key: %s", e)
+        app.logger.warning("Erro ao carregar chave VAPID: %s", e)
         return ''
 
 VAPID_PUBLIC_KEY = get_vapid_public_key()
 
 @app.get('/api/push/public_key')
+@authenticated
 def push_public_key():
     return jsonify(publicKey=VAPID_PUBLIC_KEY)
 
@@ -622,7 +1040,7 @@ def push_subscribe():
     keys = d.get('keys') or {}
     p256dh = keys.get('p256dh', '').strip()
     auth = keys.get('auth', '').strip()
-    if not endpoint or not p256dh or not auth:
+    if not endpoint or not p256dh or not auth or not endpoint.startswith('https://'):
         raise InputError('Inscrição push inválida.')
     with DB.begin() as db:
         existing = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == endpoint))
@@ -631,6 +1049,10 @@ def push_subscribe():
             existing.auth = auth
             existing.user_agent = request.headers.get('User-Agent', '')[:255]
         else:
+            # Limita a 10 dispositivos para monousuário
+            subs = list(db.scalars(select(PushSubscription).order_by(PushSubscription.id.asc())))
+            if len(subs) >= 10:
+                db.delete(subs[0])
             db.add(PushSubscription(endpoint=endpoint, p256dh=p256dh, auth=auth,
                                     user_agent=request.headers.get('User-Agent', '')[:255]))
     return jsonify(success=True)
@@ -657,6 +1079,7 @@ def push_test():
         if subs:
             try:
                 from pywebpush import webpush, WebPushException
+                import json
                 for s in subs:
                     try:
                         webpush(
@@ -678,10 +1101,11 @@ def push_test():
                     except WebPushException as ex:
                         if ex.response and ex.response.status_code in (404, 410):
                             db.delete(s)
-                        app.logger.warning("Push test error: %s", ex)
                     except Exception as e:
-                        app.logger.warning("Push error: %s", e)
+                        app.logger.warning("Erro push individual: %s", e)
             except Exception as e:
-                app.logger.warning("WebPush module error: %s", e)
+                app.logger.warning("Módulo WebPush indisponível: %s", e)
     return jsonify(sent=sent, total=subs_count)
 
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)

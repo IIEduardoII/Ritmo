@@ -1,150 +1,1319 @@
 'use strict';
-const $=s=>document.querySelector(s), main=$('#main'), dialog=$('#dialog');
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const normalizeSearch=s=>String(s).normalize('NFD').replace(/\p{M}/gu,'').toLocaleLowerCase('pt-BR').replace(/\s+/gu,'');
-function filterExercises(query){const key=normalizeSearch(query);document.querySelectorAll('[data-ex]').forEach(row=>row.hidden=!normalizeSearch(row.dataset.exName).includes(key));}
-const nameMatches=(name,query)=>normalizeSearch(name).includes(normalizeSearch(query));
-const searchNames=names=>esc(JSON.stringify(names));
-function searchBox(label,target){return `<div class="name-search"><label>${esc(label)}<input type="search" data-search-target="${target}" placeholder="Digite o nome"></label><small class="search-count" role="status"></small></div>`;}
-function bindNameSearch(root){root.querySelectorAll('[data-search-target]').forEach(input=>{input.oninput=()=>{const rows=[...root.querySelectorAll(input.dataset.searchTarget)];let count=0;rows.forEach(row=>{row.hidden=!JSON.parse(row.dataset.searchNames).some(name=>nameMatches(name,input.value));if(!row.hidden)count++;});input.closest('.name-search').querySelector('.search-count').textContent=count?`${count} de ${rows.length} resultado(s)`:'Nenhum nome encontrado.';};});}
-function pickerResults(query,id){const matches=exercises.filter(e=>nameMatches(e.name,query)),selected=exercises.find(e=>e.id===+id);return {matches,options:selected&&!matches.includes(selected)?[...matches,selected]:matches};}
-function exercisePicker(id,attributes='class="exercise-id"'){return `<div class="exercise-picker"><label>Pesquisar exercício<input class="picker-search" type="search" placeholder="Digite o nome do exercício"></label><label>Exercício<select ${attributes}>${exOptions(id)}</select></label><small class="picker-status" role="status">A seleção só muda ao escolher um exercício.</small></div>`;}
-function bindExercisePickers(root){root.querySelectorAll('.exercise-picker').forEach(picker=>{if(picker.dataset.searchBound)return;picker.dataset.searchBound='true';const input=picker.querySelector('.picker-search'),select=picker.querySelector('select');input.oninput=()=>{const id=select.value,result=pickerResults(input.value,id);select.innerHTML=result.options.map(e=>`<option value="${e.id}">${esc(e.name)} · ${esc(e.muscle)}${result.matches.includes(e)?'':' (selecionado)'}</option>`).join('');select.value=id;picker.querySelector('.picker-status').textContent=`${result.matches.length} resultado(s). A seleção só muda ao escolher um exercício.`;};select.addEventListener('change',()=>input.oninput());});}
-const today=new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date());
-let csrf='', exercises=[], routines=[], active=null, selectedMonth=today.slice(0,7), authenticated=false;
-let saving=Promise.resolve(), messageTimeout;
-function notify(message,kind="info"){
-$('#message').dataset.kind=kind;$('#message').textContent=message;$('#message').hidden=false;clearTimeout(messageTimeout);messageTimeout=setTimeout(()=>$('#message').hidden=true,6500)}
-const inflightWrites=new Map();
-function api(path,method='GET',body){if(method==='GET')return apiRequest(path,method,body);const key=JSON.stringify([path,method,body]);if(inflightWrites.has(key))return inflightWrites.get(key);const operation=apiRequest(path,method,body).finally(()=>inflightWrites.delete(key));inflightWrites.set(key,operation);return operation}
-async function apiRequest(path,method='GET',body){const started=performance.now();const response=await fetch('/api/'+path,{method,cache:'no-store',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:body===undefined?undefined:JSON.stringify(body)});let d;try{d=await response.json()}catch{throw Error('Resposta inválida do servidor. A gravação não foi confirmada.')}console.debug('Ritmo timing',JSON.stringify({method,route:path.split('?')[0].replace(/\/\d+/g,'/:id'),ui_ms:+(performance.now()-started).toFixed(2),server:response.headers.get('Server-Timing')}));if(!response.ok){if(response.status===401&&path!=='login'){authenticated=false;loginView(true)}throw Error(d.error||'Não foi possível conectar. Tente novamente.')}return d}
-function openModal(html){$('#dialog-content').innerHTML=html;if(dialog.querySelector('[data-detail-ex]'))$('#dialog-content').insertAdjacentHTML('afterbegin',searchBox('Buscar exercício no registro','[data-detail-ex]'));bindNameSearch(dialog);bindExercisePickers(dialog);dialog.showModal()}
-$('#close-dialog').onclick=()=>dialog.close();
-function confirmAction(message){return new Promise(resolve=>{const d=$('#confirm-dialog');$('#confirm-text').textContent=message;const finish=value=>{d.close();resolve(value)};$('#confirm-yes').onclick=()=>finish(true);$('#confirm-no').onclick=()=>finish(false);d.oncancel=event=>{event.preventDefault();finish(false)};d.showModal()})}
-window.addEventListener('unhandledrejection',e=>{notify(e.reason.message||'Falha de conexão. Tente novamente.');e.preventDefault()});
-const dateLabel=d=>new Date(d.length===10?d+'T12:00:00-03:00':d).toLocaleDateString('pt-BR',{timeZone:'America/Sao_Paulo'});
-const goalOptions=g=>['hipertrofia','força','condicionamento','emagrecimento'].map(v=>`<option ${v===g?'selected':''}>${v}</option>`).join('');
-const exOptions=id=>exercises.map(e=>`<option value="${e.id}" ${e.id===id?'selected':''}>${esc(e.name)} · ${esc(e.muscle)}</option>`).join('');
-function loginView(configured){$('#nav').hidden=true;$('#logout').hidden=true;main.innerHTML=`<section class="card login"><span class="eyebrow">Bem-vindo ao seu espaço</span><h1>Encontre seu ritmo.</h1><p class="muted">Organize os treinos e acompanhe cada conquista.</p>${configured?'<form id="login-form"><label for="password">Sua senha</label><input id="password" type="password" autocomplete="current-password" maxlength="256" required><button>Entrar</button></form>':'<p>Configure sua senha inicial por SSH no Termux com <code>scripts/termux-set-password.sh</code>. Depois, atualize esta página.</p>'}</section>`;if(configured)$('#login-form').onsubmit=async e=>{e.preventDefault();const result=await api('login','POST',{password:$('#password').value});csrf=result.csrf;authenticated=true;await load();await render()}}
-async function load(){[exercises,routines,active]=await Promise.all([api('exercises'),api('routines'),api('workouts/active')]);$('#nav').hidden=false;$('#logout').hidden=false}
-$('#logout').onclick=async()=>{await saving;await api('logout','POST',{});authenticated=false;exercises=[];routines=[];active=null;stopTimer();const a=await api('auth');csrf=a.csrf;loginView(a.configured)};
-async function getHistory(id){return api('history/'+id)}
-function heading(title,description,actions=''){return `<div class="heading"><div><span class="eyebrow">Seu espaço de treino</span><h1>${title}</h1><p class="muted">${description}</p></div><div class="actions">${actions}</div></div>`}
-let rendering=Promise.resolve();
-function render(){const next=rendering.catch(()=>{}).then(async()=>{await saving;return renderPage()});rendering=next;return next}
-async function renderPage(){if(!authenticated)return;const page=location.hash.slice(1)||'inicio';document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+page));if(page==='rotinas')routineView();else if(page==='exercicios')exerciseView();else if(page==='historico')await historyView();else if(page==='treino')await workoutView();else await dashboard();bindNameSearch(main);bindExercisePickers(main)}
-window.addEventListener('hashchange',()=>render());
-document.querySelectorAll('nav a,.brand').forEach(a=>a.addEventListener('click',async e=>{e.preventDefault();try{if(active&&$('#workout-notes'))await queueSave();if(location.hash===a.hash)await render();else location.hash=a.hash}catch(error){notify('Salvamento pendente. '+error.message)}}));
-function routineCard(r){return `<article class="card" data-routine-card data-search-names="${searchNames([r.name,...r.items.map(i=>i.name)])}"><div class="row"><h2>${esc(r.name)}</h2><span class="badge">${esc(r.goal)}</span></div><ul class="routine-list">${r.items.map(i=>`<li>${esc(i.name)} <small>· ${i.sets} × ${i.reps} · ${i.rest}s</small></li>`).join('')}</ul><div class="actions"><button data-start="${r.id}">Iniciar treino</button><button class="secondary" data-edit="${r.id}">Editar</button><button class="danger" data-delete="${r.id}">Excluir</button></div></article>`}
-function bindRoutines(){document.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>startWorkout(+b.dataset.start));document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>routineEditor(routines.find(r=>r.id===+b.dataset.edit)));document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=async()=>{if(!await confirmAction('Excluir esta rotina? Os treinos registrados serão preservados.'))return;await api('routines/'+b.dataset.delete,'DELETE');await load();await render();notify('Rotina excluída.','success')})}
-let startingWorkout=false;
-async function startWorkout(id,scheduleId){if(startingWorkout)return;if(active){location.hash='treino';return}startingWorkout=true;try{active=await api('workouts','POST',{routine_id:id,schedule_id:scheduleId});if(dialog.open)dialog.close();location.hash='treino';await render()}finally{startingWorkout=false}}
-function routineView(){main.innerHTML=heading('Suas rotinas.','Um plano que acompanha a sua semana.','<button id="new-routine">Criar rotina</button><button id="suggest" class="secondary">Sugestão local</button><button id="ai-suggest" class="secondary">Rascunho com Gemini</button>')+`${searchBox('Buscar rotina ou exercício','[data-routine-card]')}<div class="grid">${routines.map(routineCard).join('')||'<p class="empty">Crie sua primeira rotina ou comece por uma sugestão.</p>'}</div>`;$('#new-routine').onclick=()=>routineEditor();$('#suggest').onclick=suggestion;$('#ai-suggest').onclick=aiSuggestion;bindRoutines()}
-function itemEditor(i={exercise_id:exercises[0]?.id,sets:3,reps:10,rest:90}){return `<div class="editor-item">${exercisePicker(i.exercise_id)}<div class="fields"><label>Séries<input class="sets" type="number" min="1" max="20" value="${i.sets}" required></label><label>Repetições<input class="reps" type="number" min="1" max="1000" value="${i.reps}" required></label><label>Descanso (s)<input class="rest" type="number" min="0" max="600" value="${i.rest}" required></label><button type="button" class="danger compact remove-item">Remover</button></div></div>`}
-function bindRemove(){document.querySelectorAll('.remove-item').forEach(b=>b.onclick=()=>b.closest('.editor-item').remove())}
-function routineEditor(r={name:'',goal:'hipertrofia',items:[]}){openModal(`<h2>${r.id?'Editar':'Criar'} rotina</h2><form id="routine-form"><label>Nome<input id="routine-name" required maxlength="100" value="${esc(r.name)}"></label><label>Objetivo<select id="routine-goal">${goalOptions(r.goal)}</select></label><div id="routine-items">${r.items.map(itemEditor).join('')}</div><button type="button" id="add-item" class="secondary">+ Exercício</button><button type="submit">Salvar rotina</button></form>`);bindRemove();$('#add-item').onclick=()=>{if(document.querySelectorAll('.editor-item').length>=25){notify('Máximo de 25 exercícios.');return}$('#routine-items').insertAdjacentHTML('beforeend',itemEditor());bindRemove();bindExercisePickers(dialog)};$('#routine-form').onsubmit=async e=>{e.preventDefault();const d={name:$('#routine-name').value,goal:$('#routine-goal').value,items:[...document.querySelectorAll('.editor-item')].map(row=>({exercise_id:+row.querySelector('.exercise-id').value,sets:+row.querySelector('.sets').value,reps:+row.querySelector('.reps').value,rest:+row.querySelector('.rest').value}))};await api('routines'+(r.id?'/'+r.id:''),r.id?'PUT':'POST',d);dialog.close();await load();await render();notify('Rotina salva.','success')}}
-function suggestion(){openModal(`<h2>Um ponto de partida para você.</h2><p class="muted">Revise e adapte cada sugestão antes de salvar.</p><form id="suggest-form"><label>Objetivo<select id="suggest-goal">${goalOptions('hipertrofia')}</select></label><div class="fields"><label>Dias por semana<input id="suggest-days" type="number" min="1" max="6" value="3" required></label><label>Minutos por sessão<input id="suggest-minutes" type="number" min="15" max="120" value="45" required></label></div><button>Gerar sugestões</button></form>`);$('#suggest-form').onsubmit=async e=>{e.preventDefault();const result=await api('suggest','POST',{goal:$('#suggest-goal').value,days:+$('#suggest-days').value,minutes:+$('#suggest-minutes').value});$('#dialog-content').innerHTML=`<h2>Revise seu plano</h2><p class="muted">${esc(result.note)}</p>${searchBox('Buscar rotina ou exercício nas sugestões','[data-draft]')}${result.routines.map((r,i)=>`<article class="card" data-draft data-search-names="${searchNames([r.name,...r.items.map(i=>i.name)])}"><h3>${esc(r.name)}</h3><p>${r.items.map(i=>esc(i.name)).join(' · ')}</p><button data-review="${i}">Editar e salvar</button></article>`).join('')}`;bindNameSearch(dialog);document.querySelectorAll('[data-review]').forEach(b=>b.onclick=()=>{dialog.close();routineEditor(result.routines[+b.dataset.review])})}}
-function exerciseView(){main.innerHTML=heading('Seu repertório.','Exercícios organizados por grupo muscular.','<button id="new-exercise">Adicionar exercício</button><button id="ai-exercises" class="secondary">Rascunho com Gemini</button>')+`<div class="card"><label for="search-ex">Buscar exercício</label><input id="search-ex" type="search" placeholder="Nome do exercício"><table class="exercise-table"><thead><tr><th>Exercício</th><th>Grupo</th><th>Ações</th></tr></thead><tbody>${exercises.map(e=>`<tr data-ex="${e.id}" data-ex-name="${esc(e.name)}"><td>${esc(e.name)} ${e.custom?'<span class="badge">Seu</span>':''}</td><td>${esc(e.muscle)}</td><td><div class="actions"><button class="secondary" data-ex-edit="${e.id}">Editar</button>${e.custom?`<button class="danger" data-ex-delete="${e.id}">Excluir</button>`:'<small>Catálogo</small>'}</div></td></tr>`).join('')}</tbody></table></div>`;$('#new-exercise').onclick=()=>exerciseEditor();$('#ai-exercises').onclick=aiSuggestion;$('#search-ex').oninput=e=>filterExercises(e.target.value);document.querySelectorAll('[data-ex-edit]').forEach(b=>b.onclick=()=>exerciseEditor(exercises.find(e=>e.id===+b.dataset.exEdit)));document.querySelectorAll('[data-ex-delete]').forEach(b=>b.onclick=async()=>{if(!await confirmAction('Excluir exercício próprio? O histórico registrado será preservado.'))return;await api('exercises/'+b.dataset.exDelete,'DELETE');await load();await render();notify('Exercício excluído.','success')})}
-function exerciseEditor(e={name:'',muscle:''}){openModal(`<h2>${e.id?'Editar':'Adicionar'} exercício</h2><form id="exercise-form"><label>Nome<input id="exercise-name" required maxlength="100" value="${esc(e.name)}"></label><label>Grupo muscular<input id="exercise-muscle" required maxlength="60" value="${esc(e.muscle)}"></label><button>Salvar exercício</button></form>`);$('#exercise-form').onsubmit=async ev=>{ev.preventDefault();await api('exercises'+(e.id?'/'+e.id:''),e.id?'PUT':'POST',{name:$('#exercise-name').value,muscle:$('#exercise-muscle').value});dialog.close();await load();await render();notify('Exercício salvo.','success')}}
-async function dashboard(){const [ws,scheduled]=await Promise.all([api('workouts?month='+selectedMonth),api('schedules?month='+selectedMonth)]), planned=new Set(scheduled.filter(s=>s.status==='agendado').map(s=>s.scheduled_at.slice(0,10))), trained=new Set(ws.map(w=>w.started_at.slice(0,10))), completedDays=new Set([...trained,...scheduled.filter(s=>s.status==='concluído').map(s=>s.scheduled_at.slice(0,10))]), monthName=new Date(selectedMonth+'-02').toLocaleDateString('pt-BR',{month:'long',year:'numeric'});main.innerHTML=heading('Constância vira evolução.','Veja seu mês e encontre o próximo passo.')+`<section class="hero"><div><span class="eyebrow">${active?'Seu treino continua':'Pronto para se mover?'}</span><h2>${active?esc(active.routine_name):'Faça espaço para o seu treino.'}</h2><p>${active?'Suas séries salvas estão aqui. Retome de onde parou.':'Escolha uma rotina, registre suas séries e construa seu histórico.'}</p></div><a class="button" href="${active?'#treino':'#rotinas'}">${active?'Retomar treino':'Escolher rotina'} →</a></section><div class="stats"><div class="stat"><span>Treinos no mês</span><strong>${ws.length}</strong></div><div class="stat"><span>Dias em movimento</span><strong>${trained.size}</strong></div><div class="stat"><span>Rotinas disponíveis</span><strong>${routines.length}</strong></div></div><div class="grid"><section class="card"><button id="reminders-toggle" class="secondary">Lembretes com o Ritmo aberto</button><p id="reminders-status" role="status"></p><div class="row"><h2>${esc(monthName)}</h2><input id="month" type="month" value="${selectedMonth}" aria-label="Mês do calendário"></div><div class="calendar" id="calendar"></div><p class="muted"><small>Verde: concluído. Dourado: agendado. Toque em qualquer dia para agendar ou consultar.</small></p></section><section class="card"><h2>Registros do mês</h2>${searchBox('Buscar treino ou exercício nos registros','[data-month-record]')}${ws.map(w=>`<div class="session-row row" data-month-record data-search-names="${searchNames([w.routine_name,...w.items.map(i=>i.name)])}"><div><strong>${esc(w.routine_name)}</strong><br><small>${dateLabel(w.started_at)} · ${w.items.reduce((n,i)=>n+i.sets.filter(s=>s.done).length,0)} séries concluídas</small></div><button class="secondary compact" data-detail="${w.id}">Ver treino</button></div>`).join('')||'<p class="empty">Seu próximo treino começa este histórico.</p>'}</section></div><section class="card"><h2>Cargas neste mês</h2><p class="muted">Maior carga registrada na primeira e na última sessão do mês. Valores de exercícios diferentes não são somados.</p>${searchBox('Buscar exercício nas cargas','[data-load-row]')}<div id="monthly-loads"></div></section>`;bindReminders(scheduled);$('#month').onchange=async e=>{if(!e.target.value)return;selectedMonth=e.target.value;await dashboard();bindNameSearch(main)};let [year,month]=selectedMonth.split('-').map(Number),offset=new Date(year,month-1,1).getDay(),days=new Date(year,month,0).getDate();$('#calendar').innerHTML=['D','S','T','Q','Q','S','S'].map(n=>`<span class="weekday">${n}</span>`).join('')+'<span></span>'.repeat(offset)+Array.from({length:days},(_,i)=>{let date=`${selectedMonth}-${String(i+1).padStart(2,'0')}`;return `<button data-day="${date}" class="${completedDays.has(date)?'trained ':''}${planned.has(date)?'scheduled ':''}${date===today?'today':''}" aria-label="${i+1} de ${esc(monthName)}${completedDays.has(date)?', treino concluído':''}${planned.has(date)?', treino agendado':''}">${i+1}</button>`}).join('');document.querySelectorAll('[data-day]').forEach(b=>b.onclick=()=>dayEditor(b.dataset.day,scheduled,ws));document.querySelectorAll('[data-detail]').forEach(b=>b.onclick=()=>showDetail(ws.find(w=>w.id===+b.dataset.detail)));const grouped={};[...ws].reverse().forEach(w=>w.items.forEach(i=>{const done=i.sets.filter(s=>s.done);if(!done.length)return;const key=i.exercise_id||i.name;(grouped[key]??={name:i.name,values:[]}).values.push(Math.max(...done.map(s=>s.load)))}));$('#monthly-loads').innerHTML=Object.values(grouped).length?`<table class="exercise-table"><thead><tr><th>Exercício</th><th>Primeira</th><th>Última</th><th>Variação</th></tr></thead><tbody>${Object.values(grouped).map(g=>{let first=g.values[0],last=g.values.at(-1),delta=last-first;return `<tr data-load-row data-search-names="${searchNames([g.name])}"><td>${esc(g.name)}</td><td>${first} kg</td><td>${last} kg</td><td>${delta>0?'+':''}${delta.toFixed(2)} kg</td></tr>`}).join('')}</tbody></table>`:'<p class="empty">As cargas aparecerão após seu primeiro treino finalizado.</p>'}
-function detailHtml(w){return `<article class="card"><h3>${esc(w.routine_name)}</h3><p class="muted">${dateLabel(w.started_at)} · ${new Date(w.started_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',timeZone:'America/Sao_Paulo'})}</p>${w.items.map(i=>`<section data-detail-ex data-search-names="${searchNames([i.name])}"><h3>${esc(i.name)}</h3><p>${i.sets.map((s,n)=>`${n+1}ª série: ${s.reps} rep. × ${s.load} kg ${s.done?'✓':'(não concluída)'}`).join('<br>')}</p>${i.notes?`<p>${esc(i.notes)}</p>`:''}</section>`).join('')}${w.notes?`<p>Observações: ${esc(w.notes)}</p>`:''}</article>`}
-function showDetail(w){openModal(detailHtml(w)+`<button class="danger" id="delete-workout">Excluir registro</button>`);$('#delete-workout').onclick=async()=>{if(!await confirmAction('Excluir este registro de treino e todas as séries?'))return;await api('workouts/'+w.id,'DELETE');dialog.close();await load();await render();notify('Registro excluído.','success')}}
-async function workoutView(){if(!active){main.innerHTML=heading('Seu próximo treino.','Escolha uma rotina para começar.')+`${searchBox('Buscar rotina ou exercício','[data-routine-card]')}<div class="grid">${routines.map(routineCard).join('')||'<p class="empty">Crie uma rotina na aba Rotinas.</p>'}</div>`;bindRoutines();return}const histories=await api('history?ids='+active.items.map(i=>i.exercise_id).filter(Boolean).join(',')),last=active.items.map(i=>histories[i.exercise_id]||[]);main.innerHTML=heading('Um passo de cada vez.',esc(active.routine_name),'<button id="finish">Finalizar treino</button>')+`${searchBox('Buscar exercício no treino','[data-work-item]')}<p class="muted" id="save-state" role="status">As alterações são salvas ao sair de cada campo. Marque as séries concluídas.</p>${active.items.map((i,ix)=>{let h=last[ix],latest=h.filter(r=>r.date===h.at(-1)?.date);return `<section class="card" data-work-item="${i.id}" data-search-names="${searchNames([i.name])}"><div class="row"><h2>${esc(i.name)}</h2><button class="secondary" data-rest="${i.rest}">Descansar · ${i.rest}s</button></div><p class="workout-note muted">Último treino: ${latest.length?`${dateLabel(latest[0].date)} · `+latest.map(r=>`${r.reps} rep. × ${r.load} kg`).join(' / '):'primeiro registro — defina a carga que utiliza.'}</p><div class="set-row set-head"><span>Série</span><span>Repetições</span><span>Carga (kg)</span><span>Feita</span></div>${i.sets.map((s,n)=>`<div class="set-row" data-set="${s.id}"><span>${n+1}</span><input class="work-reps" type="number" min="0" max="1000" value="${s.reps}" aria-label="Repetições da série ${n+1}"><input class="work-load" type="number" min="0" max="9999" step="0.01" value="${s.load}" aria-label="Carga da série ${n+1}"><label><input class="work-done" type="checkbox" ${s.done?'checked':''} aria-label="Série ${n+1} concluída"></label></div>`).join('')}<label>Observações do exercício<textarea class="work-notes" maxlength="2000">${esc(i.notes)}</textarea></label></section>`}).join('')}<section class="card"><label>Observações do treino<textarea id="workout-notes" maxlength="2000">${esc(active.notes)}</textarea></label><div class="actions"><button id="save-workout">Salvar agora</button><button class="danger" id="discard">Descartar treino</button></div></section>`;document.querySelectorAll('[data-rest]').forEach(b=>b.onclick=()=>startTimer(+b.dataset.rest));document.querySelectorAll('[data-work-item] input,[data-work-item] textarea,#workout-notes').forEach(input=>input.onchange=()=>{if(input.classList.contains('work-done')&&input.checked){const item=active.items.find(i=>i.id===+input.closest('[data-work-item]').dataset.workItem);startTimer(item.rest)}queueSave().catch(()=>{})});$('#save-workout').onclick=async()=>{await queueSave();notify('Treino salvo.','success')};$('#finish').onclick=async()=>{if(!await confirmAction('Finalizar o treino? Somente séries concluídas entram na evolução.'))return;const b=$('#finish');b.disabled=true;main.querySelectorAll('input,textarea,#save-workout').forEach(el=>el.disabled=true);try{await queueSave(true);active=null;stopTimer();location.hash='inicio';await render();notify('Treino registrado. Bom trabalho!','success')}finally{if(b.isConnected){b.disabled=false;main.querySelectorAll('input,textarea,#save-workout').forEach(el=>el.disabled=false)}}};$('#discard').onclick=async()=>{if(!await confirmAction('Descartar este treino em andamento?'))return;await saving;await api('workouts/'+active.id,'DELETE');active=null;stopTimer();location.hash='inicio';await render()}}
-function collectWorkout(){return {notes:$('#workout-notes').value,items:active.items.map(i=>{const card=document.querySelector(`[data-work-item="${i.id}"]`);return {id:i.id,notes:card.querySelector('.work-notes').value,sets:i.sets.map(s=>{const row=card.querySelector(`[data-set="${s.id}"]`);return {id:s.id,reps:+row.querySelector('.work-reps').value,load:+row.querySelector('.work-load').value,done:row.querySelector('.work-done').checked}})}})}}
-let pendingSave=null, savingNow=false, lastSavedPayload='';
-function queueSave(finish=false){
- const started=performance.now(),payload=collectWorkout(),id=active.id;
- payload.finish=finish||pendingSave?.payload.finish||false;
- const key=JSON.stringify({id,payload});
- if(!savingNow&&key===lastSavedPayload)return Promise.resolve(active);
- pendingSave={id,payload,key};
- if(savingNow)return saving;
- savingNow=true;
- const state=$('#save-state');if(state){state.textContent='Salvando…';state.dataset.kind='info'}
- const button=$('#save-workout');if(button)button.disabled=true;
- saving=(async()=>{
-  // Yield once to merge duplicate submits in the same event turn.
-  await Promise.resolve();
-  while(pendingSave){const next=pendingSave;pendingSave=null;
-   active=await api('workouts/'+next.id,'PUT',next.payload);lastSavedPayload=next.key;
-  }
-  const state=$('#save-state');if(state){state.textContent='Alterações salvas no servidor.';state.dataset.kind='success'}
-  console.debug('Ritmo save',JSON.stringify({ui_total_ms:+(performance.now()-started).toFixed(2)}));
-  return active;
- })().catch(error=>{pendingSave=null;const state=$('#save-state');if(state){state.textContent='Falha ao salvar. Os campos continuam na tela; tente Salvar agora.';state.dataset.kind='error'}throw error})
- .finally(()=>{savingNow=false;if(button?.isConnected)button.disabled=false});
- return saving;
-}
-async function historyView(){main.innerHTML=heading('Veja sua evolução.','Seu histórico de cargas, sem recomendações automáticas.')+`<section class="card">${exercisePicker(exercises[0]?.id,'id="history-ex"')}<div id="history-data"></div></section>`;$('#history-ex').onchange=()=>drawHistory(+$('#history-ex').value);await drawHistory(+$('#history-ex').value)}
-async function drawHistory(id){const h=await getHistory(id),el=$('#history-data');if(!h.length){el.innerHTML='<p class="empty">Nenhuma série concluída registrada para este exercício.</p>';return}const byDate={};h.forEach(r=>byDate[r.date]=Math.max(byDate[r.date]??0,r.load));const points=Object.entries(byDate),max=Math.max(1,...points.map(p=>p[1])),x=i=>50+(points.length===1?260:i*520/(points.length-1)),y=v=>200-v*155/max;el.innerHTML=`<p class="muted">Maior carga por sessão (kg). Cada linha abaixo representa uma série concluída.</p><svg class="chart" viewBox="0 0 620 250" role="img" aria-label="Gráfico da maior carga por sessão"><line x1="50" y1="200" x2="580" y2="200"/><line x1="50" y1="45" x2="580" y2="45"/><text x="8" y="200">0 kg</text><text x="8" y="42">${max} kg</text><polyline points="${points.map((p,i)=>`${x(i)},${y(p[1])}`).join(' ')}"/>${points.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p[1])}" r="4"><title>${dateLabel(p[0])}: ${p[1]} kg</title></circle>`).join('')}<text x="50" y="230">${dateLabel(points[0][0])}</text><text x="570" y="230" text-anchor="end">${dateLabel(points.at(-1)[0])}</text></svg><table class="exercise-table"><thead><tr><th>Data</th><th>Repetições</th><th>Carga</th></tr></thead><tbody>${[...h].reverse().map(r=>`<tr><td>${dateLabel(r.date)}</td><td>${r.reps}</td><td>${r.load} kg</td></tr>`).join('')}</tbody></table>`}
-let timerEnd=0,timerRemaining=0,timerPaused=false;
-function startTimer(seconds){timerRemaining=seconds*1000;timerEnd=Date.now()+timerRemaining;timerPaused=false;$('#timer').hidden=false;$('#timer-toggle').textContent='Pausar';tick()}
-function stopTimer(){$('#timer').hidden=true;timerEnd=0;timerRemaining=0}
-function tick(){if(!timerEnd)return;const ms=timerPaused?timerRemaining:Math.max(0,timerEnd-Date.now()),sec=Math.ceil(ms/1000);$('#clock').textContent=`${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;if(!timerPaused&&ms===0){stopTimer();notify('Descanso concluído. Quando estiver pronto, siga para a próxima série.','success')}}
-$('#timer-toggle').onclick=()=>{if(timerPaused){timerEnd=Date.now()+timerRemaining;timerPaused=false}else{timerRemaining=Math.max(0,timerEnd-Date.now());timerPaused=true}$('#timer-toggle').textContent=timerPaused?'Continuar':'Pausar';tick()};$('#timer-skip').onclick=stopTimer;setInterval(tick,250);
-(async()=>{const a=await api('auth');csrf=a.csrf;authenticated=a.authenticated;if(authenticated){await load();await render()}else loginView(a.configured)})();
 
-async function dayEditor(date,scheduled,workouts){
- const entries=scheduled.filter(s=>s.scheduled_at.startsWith(date));
- const linked=await Promise.all(entries.filter(s=>s.workout_id).map(s=>api('workouts/'+s.workout_id)));
- const records=[...new Map([...workouts.filter(w=>w.started_at.startsWith(date)),...linked].map(w=>[w.id,w])).values()];
- openModal(`<h2>${date.split('-').reverse().join('/')}</h2><h3>Agendamentos</h3>${entries.map(s=>`<article class="card"><strong>${esc(s.scheduled_at.slice(11,16))} — ${esc(s.routine_name)}</strong><p>${esc(s.status)}</p>${s.status==='agendado'?`<button data-schedule-start="${s.id}">Iniciar rotina</button>`:''}${s.workout_id?`<button class="secondary" data-schedule-record="${s.workout_id}">Ver registros</button>`:''}<button class="danger" data-schedule-delete="${s.id}">Remover agendamento</button></article>`).join('')||'<p>Nenhum treino agendado.</p>'}<form id="schedule-form"><label>Rotina<select id="schedule-routine" required>${routines.map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select></label><label>Horário (Brasília)<input id="schedule-time" type="time" value="06:00" required></label><button ${routines.length?'':'disabled'}>Agendar treino</button></form><h3>Treinos realizados</h3>${records.map(w=>`<p>${w.finished_at?'Concluído':'Em andamento'}</p>${detailHtml(w)}`).join('')||'<p>Nenhum treino realizado.</p>'}`);
- $('#schedule-form').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('button');if(button.disabled)return;button.disabled=true;try{await api('schedules','POST',{routine_id:+$('#schedule-routine').value,scheduled_at:date+'T'+$('#schedule-time').value});dialog.close();await render();notify('Treino agendado.','success')}finally{if(button.isConnected)button.disabled=false}};
- dialog.querySelectorAll('[data-schedule-start]').forEach(b=>b.onclick=()=>{const s=entries.find(s=>s.id===+b.dataset.scheduleStart);return startWorkout(s.routine_id,s.id)});
- dialog.querySelectorAll('[data-schedule-record]').forEach(b=>b.onclick=async()=>{const w=await api('workouts/'+b.dataset.scheduleRecord);$('#dialog-content').innerHTML=detailHtml(w);});
- dialog.querySelectorAll('[data-schedule-delete]').forEach(b=>b.onclick=async()=>{if(b.disabled)return;b.disabled=true;try{await api('schedules/'+b.dataset.scheduleDelete,'DELETE');dialog.close();await render()}finally{if(b.isConnected)b.disabled=false}});
-}
-function urlB64ToUint8Array(b64){const p='='.repeat((4-b64.length%4)%4),b=(b64+p).replace(/\-/g,'+').replace(/_/g,'/'),r=window.atob(b),a=new Uint8Array(r.length);for(let i=0;i<r.length;++i)a[i]=r.charCodeAt(i);return a}
-let reminderEnabled=false,pushActive=false,reminderSchedules=[],reminderSent=new Set(),remindersChecking=false;
-async function syncPush(){
- if(!('serviceWorker' in navigator)||!('PushManager' in window))return false;
- try{
-  const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();
-  if(!sub){const res=await api('push/public_key');if(!res.publicKey)return false;sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64ToUint8Array(res.publicKey)})}
-  await api('push/subscribe','POST',sub.toJSON?sub.toJSON():JSON.parse(JSON.stringify(sub)));
-  pushActive=true;return true;
- }catch(e){console.warn('Push error',e);pushActive=false;return false}
-}
-function bindReminders(entries){
- reminderSchedules=entries;
- const button=$('#reminders-toggle'),status=$('#reminders-status');
- const supported=window.isSecureContext&&'Notification' in window;
- const update=()=>{
-  button.disabled=!supported;
-  button.textContent=reminderEnabled?'Desativar notificações':'Ativar notificações de treino';
-  status.textContent=!supported?'Notificações exigem contexto seguro (HTTPS). Consulte os horários no calendário.':reminderEnabled?(pushActive?'Notificações ativas (mesmo com o aplicativo fechado).':'Notificações ativas com a página aberta.'):'Ative para receber avisos sobre os treinos agendados.';
- };
- button.onclick=async()=>{
-  if(reminderEnabled){
-   reminderEnabled=false;pushActive=false;
-   try{const reg=await navigator.serviceWorker?.ready,sub=await reg?.pushManager?.getSubscription();if(sub){await api('push/unsubscribe','POST',{endpoint:sub.endpoint});await sub.unsubscribe()}}catch{}
-   update();notify('Notificações desativadas.');return;
-  }
-  try{
-   button.disabled=true;
-   const perm=await Notification.requestPermission();
-   if(perm!=='granted'){reminderEnabled=false;update();notify('Permissão não concedida.','error');return}
-   reminderEnabled=true;
-   const ok=await syncPush();update();
-   notify(ok?'Notificações ativadas! (Funcionam com o app fechado)':'Notificações ativadas com a página aberta.','success');
-  }catch{status.textContent='Erro ao configurar notificações.'}finally{button.disabled=false}
- };
- if(supported&&Notification.permission==='granted'){
-  reminderEnabled=true;navigator.serviceWorker?.ready.then(reg=>reg.pushManager.getSubscription()).then(sub=>{if(sub)pushActive=true;update()}).catch(()=>update());
- }else{update()}
-}
-async function checkReminders(){
- if(remindersChecking||!authenticated||!reminderEnabled||Notification.permission!=='granted')return;
- remindersChecking=true;
- try{
-  const month=new Intl.DateTimeFormat('sv-SE',{timeZone:'America/Sao_Paulo'}).format(new Date()).slice(0,7);
-  reminderSchedules=await api('schedules?month='+month);
-  if(!authenticated||!reminderEnabled||Notification.permission!=='granted')return;
-  for(const s of reminderSchedules){const delta=Date.now()-Date.parse(s.scheduled_at);if(s.status!=='agendado'||delta<0||delta>60000||reminderSent.has(s.id))continue;
-   const n=new Notification('Ritmo: treino agendado',{body:`${s.scheduled_at.slice(11,16)} — ${s.routine_name}`,tag:'ritmo-'+s.id});reminderSent.add(s.id);n.onclick=()=>{window.focus();location.hash='inicio'};
-  }
- }catch{}
- finally{remindersChecking=false}
-}
-setInterval(checkReminders,30000);
+// ---------------------------------------------------------------------------
+// Ritmo v1.1.0 - Single Page Application (100% Vanilla JS, Local-First)
+// ---------------------------------------------------------------------------
+let csrfToken = '';
+let activeWorkout = null;
+let selectedMonth = new Date().toISOString().slice(0, 7);
+let timerEnd = null;
+let timerPaused = false;
+let timerRemaining = 0;
+let timerInterval = null;
 
+const $ = sel => document.querySelector(sel);
+const main = $('#main');
+const dialog = $('#dialog');
+const dialogContent = $('#dialog-content');
+const confirmDialog = $('#confirm-dialog');
+
+const MUSCLE_LABELS = {
+  peito: 'Peito',
+  costas: 'Costas',
+  quadriceps: 'Quadríceps',
+  posterior: 'Posterior',
+  ombros: 'Ombros',
+  biceps: 'Bíceps',
+  triceps: 'Tríceps',
+  abdomen: 'Abdômen',
+  panturrilha: 'Panturrilha',
+  outro: 'Outro'
+};
+
+const MUSCLE_ORDER = [
+  'peito', 'costas', 'quadriceps', 'posterior',
+  'ombros', 'biceps', 'triceps', 'abdomen', 'panturrilha', 'outro'
+];
+
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function notify(text, kind = 'info') {
+  const box = $('#message');
+  box.textContent = text;
+  box.dataset.kind = kind;
+  box.hidden = false;
+  setTimeout(() => { box.hidden = true; }, 4000);
+}
+
+function confirmAction(text) {
+  return new Promise(resolve => {
+    $('#confirm-text').textContent = text;
+    confirmDialog.showModal();
+    const yes = () => { cleanup(); resolve(true); confirmDialog.close(); };
+    const no = () => { cleanup(); resolve(false); confirmDialog.close(); };
+    function cleanup() {
+      $('#confirm-yes').removeEventListener('click', yes);
+      $('#confirm-no').removeEventListener('click', no);
+    }
+    $('#confirm-yes').addEventListener('click', yes);
+    $('#confirm-no').addEventListener('click', no);
+  });
+}
+
+async function api(endpoint, method = 'GET', body = null, isForm = false) {
+  const options = {
+    method,
+    headers: { 'X-CSRF-Token': csrfToken }
+  };
+  if (body) {
+    if (isForm) {
+      options.body = body;
+    } else {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
+    }
+  }
+  const res = await fetch('/api/' + endpoint, options);
+  if (!res.ok) {
+    let err = 'Erro na requisição.';
+    try {
+      const data = await res.json();
+      if (data && data.error) err = data.error;
+    } catch {}
+    throw new Error(err);
+  }
+  return await res.json();
+}
+
+function heading(title, subtitle) {
+  return `<div class="heading"><div><span class="eyebrow">Ritmo v1.1.0</span><h1>${esc(title)}</h1><p class="muted">${esc(subtitle)}</p></div></div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Timer de Descanso Persistente com Vibração
+// ---------------------------------------------------------------------------
+function initTimer() {
+  const saved = localStorage.getItem('ritmo.timerEnd');
+  if (saved) {
+    const end = parseInt(saved, 10);
+    if (end > Date.now()) {
+      timerEnd = end;
+      runTimer();
+    } else {
+      localStorage.removeItem('ritmo.timerEnd');
+    }
+  }
+}
+
+function startTimer(seconds) {
+  if (!seconds || seconds <= 0) return;
+  timerEnd = Date.now() + seconds * 1000;
+  timerPaused = false;
+  localStorage.setItem('ritmo.timerEnd', timerEnd);
+  runTimer();
+}
+
+function runTimer() {
+  clearInterval(timerInterval);
+  const timerBox = $('#timer');
+  const clock = $('#clock');
+  const toggleBtn = $('#timer-toggle');
+  timerBox.hidden = false;
+
+  timerInterval = setInterval(() => {
+    if (timerPaused) return;
+    const diff = Math.max(0, Math.ceil((timerEnd - Date.now()) / 1000));
+    const m = String(Math.floor(diff / 60)).padStart(2, '0');
+    const s = String(diff % 60).padStart(2, '0');
+    clock.textContent = `${m}:${s}`;
+
+    if (diff <= 0) {
+      clearInterval(timerInterval);
+      localStorage.removeItem('ritmo.timerEnd');
+      timerBox.hidden = true;
+      if (navigator.vibrate) navigator.vibrate([250, 150, 250]);
+      notify('Descanso concluído! Hora da próxima série.', 'success');
+    }
+  }, 500);
+
+  toggleBtn.onclick = () => {
+    if (timerPaused) {
+      timerEnd = Date.now() + timerRemaining * 1000;
+      timerPaused = false;
+      toggleBtn.textContent = 'Pausar';
+    } else {
+      timerRemaining = Math.max(0, Math.ceil((timerEnd - Date.now()) / 1000));
+      timerPaused = true;
+      toggleBtn.textContent = 'Continuar';
+    }
+  };
+
+  $('#timer-skip').onclick = () => {
+    clearInterval(timerInterval);
+    localStorage.removeItem('ritmo.timerEnd');
+    timerBox.hidden = true;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Micro-Gráfico Minimalista SVG (Zero Libs)
+// ---------------------------------------------------------------------------
+function renderWeightSvg(metrics) {
+  if (!metrics || metrics.length < 2) return '';
+  const sorted = [...metrics].reverse(); // cronológico crescente
+  const weights = sorted.map(m => m.weight);
+  const minW = Math.min(...weights);
+  const maxW = Math.max(...weights);
+  const range = (maxW - minW) || 1;
+
+  const width = 600;
+  const height = 140;
+  const paddingX = 40;
+  const paddingY = 25;
+
+  const points = sorted.map((m, i) => {
+    const x = paddingX + (i / (sorted.length - 1)) * (width - paddingX * 2);
+    const y = height - paddingY - ((m.weight - minW) / range) * (height - paddingY * 2);
+    return { x: x.toFixed(1), y: y.toFixed(1), w: m.weight, date: m.recorded_at.slice(5) };
+  });
+
+  const polyline = points.map(p => `${p.x},${p.y}`).join(' ');
+
+  return `
+    <div class="card" style="margin-top:20px;">
+      <h3 style="margin-bottom:8px;">Curva de Massa Corporal</h3>
+      <svg class="micro-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+        <line x1="${paddingX}" y1="${paddingY}" x2="${width - paddingX}" y2="${paddingY}" stroke="#333" stroke-dasharray="4"/>
+        <line x1="${paddingX}" y1="${height - paddingY}" x2="${width - paddingX}" y2="${height - paddingY}" stroke="#333" stroke-dasharray="4"/>
+        <text x="5" y="${paddingY + 4}">${maxW.toFixed(1)}kg</text>
+        <text x="5" y="${height - paddingY + 4}">${minW.toFixed(1)}kg</text>
+        <polyline points="${polyline}" />
+        ${points.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5"><title>${p.date}: ${p.w} kg</title></circle>`).join('')}
+      </svg>
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 1: Dashboard / Início (#inicio)
+// ---------------------------------------------------------------------------
+async function dashboardView() {
+  const [active, monthData, routines] = await Promise.all([
+    api('workouts/active'),
+    api(`calendar/month?month=${selectedMonth}`),
+    api('routines')
+  ]);
+  activeWorkout = active;
+
+  const trainedSet = new Set(monthData.trained_dates || []);
+  const scheduledSet = new Set(monthData.scheduled_dates || []);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const monthDate = new Date(selectedMonth + '-02');
+  const monthName = monthDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+
+  // Calendário
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  let calHtml = '<div class="calendar">';
+  ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].forEach(d => {
+    calHtml += `<span class="weekday">${d}</span>`;
+  });
+  for (let i = 0; i < firstDay; i++) calHtml += '<span></span>';
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    let cls = [];
+    if (trainedSet.has(dStr)) cls.push('trained');
+    if (scheduledSet.has(dStr)) cls.push('scheduled');
+    if (dStr === todayStr) cls.push('today');
+    calHtml += `<button type="button" class="${cls.join(' ')}" data-cal-day="${dStr}" aria-label="${day} de ${monthName}">${day}</button>`;
+  }
+  calHtml += '</div>';
+
+  main.innerHTML = heading('Constância vira evolução.', 'Seu ecossistema local e independente de treino.') + `
+    <section class="hero">
+      <div>
+        <span class="eyebrow">${active ? 'Treino em andamento' : 'Pronto para treinar?'}</span>
+        <h2>${active ? esc(active.routine_name) : 'Faça espaço para o seu treino.'}</h2>
+        <p>${active ? 'Suas séries salvas estão prontas. Retome de onde parou.' : 'Escolha uma rotina, registre suas séries e acompanhe a evolução.'}</p>
+      </div>
+      <a class="button" href="${active ? '#treino' : '#rotinas'}">${active ? 'Retomar treino →' : 'Escolher rotina →'}</a>
+    </section>
+
+    <div class="stats">
+      <div class="stat"><span>Treinos no mês</span><strong>${trainedSet.size}</strong></div>
+      <div class="stat"><span>Rotinas criadas</span><strong>${routines.length}</strong></div>
+      <div class="stat"><span>Status do Sistema</span><strong>100% Offline</strong></div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <div class="row">
+          <h2>${esc(monthName)}</h2>
+          <input id="month-select" type="month" value="${selectedMonth}" aria-label="Mês do calendário" style="width:auto;">
+        </div>
+        ${calHtml}
+        <p class="muted"><small>● Verde: Concluído &nbsp; ● Borda Dourada: Agendado &nbsp; ▢ Destaque: Hoje</small></p>
+      </section>
+
+      <section class="card">
+        <h2>Minhas Rotinas</h2>
+        ${routines.length ? `
+          <div class="routine-list-box">
+            ${routines.map(r => `
+              <div class="session-row row">
+                <div>
+                  <strong>${esc(r.name)}</strong>
+                  <div class="muted"><small>${esc(r.target_muscle_groups ? r.target_muscle_groups.split(',').map(m => MUSCLE_LABELS[m] || m).join(', ') : 'Geral')} · ${r.items.length} exercícios</small></div>
+                </div>
+                <button class="secondary compact" data-start-routine="${r.id}">Iniciar</button>
+              </div>
+            `).join('')}
+          </div>
+        ` : `<p class="empty">Nenhuma rotina cadastrada ainda. <a href="#rotinas">Criar primeira rotina</a>.</p>`}
+      </section>
+    </div>
+  `;
+
+  // Listeners do Dashboard
+  $('#month-select').onchange = e => {
+    selectedMonth = e.target.value;
+    dashboardView();
+  };
+
+  document.querySelectorAll('[data-cal-day]').forEach(btn => {
+    btn.onclick = () => openCalendarDay(btn.dataset.calDay);
+  });
+
+  document.querySelectorAll('[data-start-routine]').forEach(btn => {
+    btn.onclick = async () => {
+      try {
+        const w = await api('workouts', 'POST', { routine_id: +btn.dataset.startRoutine });
+        activeWorkout = w;
+        location.hash = '#treino';
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// MODAL: Matriz de Estados Temporais do Dia (PONTO 7)
+// ---------------------------------------------------------------------------
+async function openCalendarDay(dateStr) {
+  dialogContent.innerHTML = '<p>Carregando estado do dia…</p>';
+  dialog.showModal();
+
+  try {
+    const dayData = await api(`calendar/day/${dateStr}`);
+    const routines = await api('routines');
+    const [y, m, d] = dateStr.split('-');
+    const formatted = `${d}/${m}/${y}`;
+
+    let body = `<h2>${formatted}</h2>`;
+
+    if (dayData.state === 'past_trained' && dayData.workout) {
+      const w = dayData.workout;
+      body += `
+        <div class="temporal-card temporal-past-trained">
+          <span class="eyebrow" style="color:var(--success);">Treino Realizado</span>
+          <h3>${esc(w.routine_name)}</h3>
+          <p class="muted"><small>Finalizado às ${w.finished_at ? new Date(w.finished_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}</small></p>
+          <table class="exercise-table">
+            <thead><tr><th>Exercício</th><th>Séries Feitas</th><th>Carga Máx</th></tr></thead>
+            <tbody>
+              ${w.items.map(it => {
+                const doneSets = it.sets.filter(s => s.done);
+                const maxLoad = doneSets.length ? Math.max(...doneSets.map(s => s.load)) : 0;
+                return `<tr><td>${esc(it.name)}</td><td>${doneSets.length} / ${it.sets.length}</td><td>${maxLoad} kg</td></tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+          <p class="muted" style="margin-top:14px;"><small>Histórico registrado com sucesso. Dias passados são bloqueados para novos agendamentos.</small></p>
+        </div>
+      `;
+    } else if (dayData.state === 'past_rest') {
+      body += `
+        <div class="temporal-card temporal-past-rest">
+          <svg style="width:48px;height:48px;fill:none;stroke:var(--muted);stroke-width:1.5;margin-bottom:8px;" viewBox="0 0 24 24"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/><path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z"/></svg>
+          <h3>Dia de descanso / Nenhum treino realizado</h3>
+          <p class="muted">Esta data já passou. Não é permitido criar novos agendamentos no passado.</p>
+        </div>
+      `;
+    } else if (dayData.state === 'today_trained' && dayData.workout) {
+      const w = dayData.workout;
+      body += `
+        <div class="temporal-card temporal-past-trained">
+          <span class="eyebrow" style="color:var(--success);">Treino de Hoje Concluído!</span>
+          <h3>${esc(w.routine_name)}</h3>
+          <p class="muted">Excelente trabalho! O treino de hoje já foi consolidado com sucesso.</p>
+        </div>
+      `;
+    } else if (dayData.state === 'today_ready') {
+      body += `
+        <div class="temporal-card temporal-today-ready">
+          <span class="eyebrow" style="color:var(--lime);">Treino de Hoje Agendado</span>
+          <h3>${esc(dayData.schedules[0] ? dayData.schedules[0].routine_name : 'Treino Programado')}</h3>
+          <p>Está na hora de se mover. Inicie sua sessão diretamente agora:</p>
+          <div class="actions" style="margin-top:16px;">
+            <button id="btn-start-today" style="width:100%;font-size:16px;padding:14px;">[ Iniciar Treino de Hoje → ]</button>
+          </div>
+        </div>
+      `;
+    } else {
+      // Futuro ou Hoje sem treino
+      body += `
+        <div class="temporal-card">
+          <h3>Agendar Treino para ${formatted}</h3>
+          ${dayData.schedules && dayData.schedules.length ? `
+            <div style="margin-bottom:18px;">
+              <span class="eyebrow">Agendamento existente:</span>
+              <p><strong>${esc(dayData.schedules[0].routine_name)}</strong> às ${dayData.schedules[0].scheduled_at.slice(11, 16)}</p>
+              <button class="danger compact" id="btn-del-sched" data-id="${dayData.schedules[0].id}">Excluir Agendamento</button>
+            </div>
+          ` : `
+            <form id="form-schedule" style="margin-top:12px;">
+              <label for="sched-routine">Escolha a Rotina:</label>
+              <select id="sched-routine" required>
+                ${routines.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('')}
+              </select>
+              <label for="sched-time">Horário:</label>
+              <input id="sched-time" type="time" value="07:00" required>
+              <div class="actions" style="margin-top:16px;">
+                <button type="submit">+ Agendar Treino</button>
+              </div>
+            </form>
+          `}
+        </div>
+      `;
+    }
+
+    dialogContent.innerHTML = body;
+
+    const startTodayBtn = $('#btn-start-today');
+    if (startTodayBtn) {
+      startTodayBtn.onclick = async () => {
+        const sched = dayData.schedules[0];
+        try {
+          const w = await api('workouts', 'POST', {
+            routine_id: sched ? sched.routine_id : routines[0].id,
+            schedule_id: sched ? sched.id : undefined
+          });
+          dialog.close();
+          activeWorkout = w;
+          location.hash = '#treino';
+        } catch (err) {
+          notify(err.message, 'danger');
+        }
+      };
+    }
+
+    const delSchedBtn = $('#btn-del-sched');
+    if (delSchedBtn) {
+      delSchedBtn.onclick = async () => {
+        if (!await confirmAction('Deseja excluir este agendamento?')) return;
+        try {
+          await api(`schedules/${delSchedBtn.dataset.id}`, 'DELETE');
+          dialog.close();
+          dashboardView();
+          notify('Agendamento excluído.');
+        } catch (err) {
+          notify(err.message, 'danger');
+        }
+      };
+    }
+
+    const schedForm = $('#form-schedule');
+    if (schedForm) {
+      schedForm.onsubmit = async e => {
+        e.preventDefault();
+        const routineId = +$('#sched-routine').value;
+        const time = $('#sched-time').value;
+        const scheduledAt = `${dateStr}T${time}`;
+        try {
+          await api('schedules', 'POST', { routine_id: routineId, scheduled_at: scheduledAt });
+          dialog.close();
+          dashboardView();
+          notify('Treino agendado com sucesso!', 'success');
+        } catch (err) {
+          notify(err.message, 'danger');
+        }
+      };
+    }
+  } catch (err) {
+    dialogContent.innerHTML = `<p class="danger">${esc(err.message)}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 2: Rotinas Anatômicas (#rotinas)
+// ---------------------------------------------------------------------------
+async function routinesView() {
+  const routines = await api('routines');
+
+  main.innerHTML = heading('Rotinas de Treino', 'Organize suas sessões por grupos musculares anatômicos.') + `
+    <div class="row" style="margin-bottom:20px;">
+      <h2>Minhas Fichas</h2>
+      <button id="btn-new-routine">+ Nova Rotina</button>
+    </div>
+
+    ${routines.length ? `
+      <div class="grid">
+        ${routines.map(r => `
+          <div class="card">
+            <div class="row">
+              <h3>${esc(r.name)}</h3>
+              <span class="badge">${esc(r.target_muscle_groups ? r.target_muscle_groups.split(',').map(m => MUSCLE_LABELS[m] || m).join(', ') : 'Geral')}</span>
+            </div>
+            <ol class="routine-list">
+              ${r.items.map(it => `<li><strong>${esc(it.name)}</strong>: ${it.sets} séries × ${it.reps} reps (descanso ${it.rest}s)</li>`).join('')}
+            </ol>
+            <div class="actions">
+              <button data-start="${r.id}">Treinar Agora</button>
+              <button class="secondary compact" data-edit="${r.id}">Editar</button>
+              <button class="danger compact" data-delete="${r.id}">Excluir</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    ` : `<p class="empty">Nenhuma rotina encontrada. Comece criando sua primeira rotina!</p>`}
+  `;
+
+  $('#btn-new-routine').onclick = () => openRoutineEditor();
+
+  document.querySelectorAll('[data-start]').forEach(b => {
+    b.onclick = async () => {
+      try {
+        const w = await api('workouts', 'POST', { routine_id: +b.dataset.start });
+        activeWorkout = w;
+        location.hash = '#treino';
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-edit]').forEach(b => {
+    b.onclick = () => {
+      const routine = routines.find(r => r.id === +b.dataset.edit);
+      openRoutineEditor(routine);
+    };
+  });
+
+  document.querySelectorAll('[data-delete]').forEach(b => {
+    b.onclick = async () => {
+      if (!await confirmAction('Excluir esta rotina permanentemente?')) return;
+      try {
+        await api(`routines/${b.dataset.delete}`, 'DELETE');
+        routinesView();
+        notify('Rotina excluída.');
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  });
+}
+
+// Modal do Editor de Rotinas com Filtro por Chips Anatômicos (PONTO 8 e PONTO 9)
+async function openRoutineEditor(existing = null) {
+  const exercises = await api('exercises');
+  let selectedItems = existing ? JSON.parse(JSON.stringify(existing.items)) : [];
+  let selectedMuscles = existing && existing.target_muscle_groups ? existing.target_muscle_groups.split(',').filter(Boolean) : [];
+
+  function renderEditor() {
+    dialogContent.innerHTML = `
+      <h2>${existing ? 'Editar Rotina' : 'Nova Rotina'}</h2>
+      <form id="routine-form">
+        <label for="rot-name">Nome da Rotina:</label>
+        <input id="rot-name" required value="${existing ? esc(existing.name) : ''}" placeholder="Ex: Treino A - Peito e Tríceps">
+
+        <label>Grupos Musculares Trabalhados:</label>
+        <div class="chips">
+          ${MUSCLE_ORDER.map(m => `
+            <div class="chip ${selectedMuscles.includes(m) ? 'active' : ''}" data-muscle-chip="${m}">
+              ${MUSCLE_LABELS[m]}
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="row" style="margin-top:20px;">
+          <h3>Exercícios da Rotina (${selectedItems.length})</h3>
+          <button type="button" class="secondary compact" id="btn-add-ex">+ Adicionar Exercício</button>
+        </div>
+
+        <div id="routine-items-box" style="margin:12px 0;">
+          ${selectedItems.map((it, idx) => `
+            <div class="editor-item">
+              <strong>${idx + 1}. ${esc(it.name)}</strong>
+              <div class="fields" style="margin-top:8px;">
+                <div><label>Séries</label><input type="number" min="1" max="20" value="${it.sets}" data-item-field="sets" data-idx="${idx}"></div>
+                <div><label>Repetições</label><input type="number" min="1" max="1000" value="${it.reps}" data-item-field="reps" data-idx="${idx}"></div>
+                <div><label>Descanso (s)</label><input type="number" min="0" max="600" step="5" value="${it.rest}" data-item-field="rest" data-idx="${idx}"></div>
+                <div style="display:flex;align-items:flex-end;"><button type="button" class="danger compact" data-remove-item="${idx}">✕</button></div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="actions" style="margin-top:24px;">
+          <button type="submit">Salvar Rotina</button>
+        </div>
+      </form>
+    `;
+
+    document.querySelectorAll('[data-muscle-chip]').forEach(c => {
+      c.onclick = () => {
+        const m = c.dataset.muscleChip;
+        if (selectedMuscles.includes(m)) {
+          selectedMuscles = selectedMuscles.filter(x => x !== m);
+        } else {
+          selectedMuscles.push(m);
+        }
+        renderEditor();
+      };
+    });
+
+    document.querySelectorAll('[data-item-field]').forEach(inp => {
+      inp.onchange = () => {
+        const idx = +inp.dataset.idx;
+        const fld = inp.dataset.itemField;
+        selectedItems[idx][fld] = +inp.value;
+      };
+    });
+
+    document.querySelectorAll('[data-remove-item]').forEach(b => {
+      b.onclick = () => {
+        selectedItems.splice(+b.dataset.removeItem, 1);
+        renderEditor();
+      };
+    });
+
+    $('#btn-add-ex').onclick = () => openExerciseSelector(exercises, item => {
+      selectedItems.push({
+        exercise_id: item.id,
+        name: item.name,
+        sets: 3,
+        reps: 10,
+        rest: 90
+      });
+      renderEditor();
+    });
+
+    $('#routine-form').onsubmit = async e => {
+      e.preventDefault();
+      const name = $('#rot-name').value.trim();
+      if (!selectedItems.length) {
+        notify('Adicione pelo menos um exercício à rotina.', 'danger');
+        return;
+      }
+      const payload = {
+        name,
+        target_muscle_groups: selectedMuscles.join(','),
+        items: selectedItems
+      };
+      try {
+        if (existing) {
+          await api(`routines/${existing.id}`, 'PUT', payload);
+        } else {
+          await api('routines', 'POST', payload);
+        }
+        dialog.close();
+        routinesView();
+        notify('Rotina salva com sucesso!', 'success');
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  }
+
+  renderEditor();
+  dialog.showModal();
+}
+
+// Sub-modal seletor de exercícios com Chips Anatômicos e Busca Reativa (PONTO 8)
+function openExerciseSelector(allExercises, onSelect) {
+  let activeFilter = 'todos';
+  let searchTerm = '';
+
+  function renderPicker() {
+    const filtered = allExercises.filter(ex => {
+      const matchMuscle = (activeFilter === 'todos') || (ex.muscle_group === activeFilter);
+      const matchSearch = !searchTerm || ex.name.toLowerCase().includes(searchTerm.toLowerCase());
+      return matchMuscle && matchSearch;
+    });
+
+    dialogContent.innerHTML = `
+      <h3>Selecionar Exercício</h3>
+      <div class="chips">
+        <div class="chip ${activeFilter === 'todos' ? 'active' : ''}" data-picker-chip="todos">Todos</div>
+        ${MUSCLE_ORDER.map(m => `
+          <div class="chip ${activeFilter === m ? 'active' : ''}" data-picker-chip="${m}">${MUSCLE_LABELS[m]}</div>
+        `).join('')}
+      </div>
+      <input id="picker-search" placeholder="Filtrar por nome do exercício..." value="${esc(searchTerm)}" style="margin:10px 0;">
+      
+      <div style="max-height:300px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:8px;">
+        ${filtered.length ? filtered.map(ex => `
+          <div class="session-row row" style="padding:8px;">
+            <div>
+              <strong>${esc(ex.name)}</strong>
+              <span class="muted" style="margin-left:8px;font-size:11px;">${MUSCLE_LABELS[ex.muscle_group] || ex.muscle_group}</span>
+            </div>
+            <button type="button" class="compact" data-pick-id="${ex.id}">Escolher</button>
+          </div>
+        `).join('') : '<p class="empty">Nenhum exercício encontrado com esses filtros.</p>'}
+      </div>
+      <div class="actions" style="margin-top:16px;">
+        <button type="button" class="secondary" id="btn-cancel-picker">Voltar</button>
+      </div>
+    `;
+
+    document.querySelectorAll('[data-picker-chip]').forEach(c => {
+      c.onclick = () => {
+        activeFilter = c.dataset.pickerChip;
+        renderPicker();
+      };
+    });
+
+    const searchInp = $('#picker-search');
+    searchInp.focus();
+    searchInp.oninput = () => {
+      searchTerm = searchInp.value;
+      renderPicker();
+    };
+
+    document.querySelectorAll('[data-pick-id]').forEach(b => {
+      b.onclick = () => {
+        const item = allExercises.find(x => x.id === +b.dataset.pickId);
+        onSelect(item);
+      };
+    });
+
+    $('#btn-cancel-picker').onclick = () => {
+      onSelect(null); // Fecha seletor mantendo editor
+    };
+  }
+
+  renderPicker();
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 3: Treino em Execução (#treino)
+// ---------------------------------------------------------------------------
+async function workoutView() {
+  const active = await api('workouts/active');
+  activeWorkout = active;
+
+  if (!active) {
+    main.innerHTML = heading('Execução de Treino', 'Nenhum treino em andamento no momento.') + `
+      <section class="card" style="text-align:center;padding:40px 20px;">
+        <p>Você não possui nenhum treino ativo agora.</p>
+        <a class="button" href="#rotinas">Escolher uma Rotina para Treinar →</a>
+      </section>
+    `;
+    return;
+  }
+
+  const w = active;
+  main.innerHTML = heading('Treino Ativo: ' + w.routine_name, 'Marque as séries conforme concluídas.') + `
+    <div class="row" style="margin-bottom:18px;">
+      <span class="muted">Iniciado às ${new Date(w.started_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+      <div class="actions">
+        <button class="danger compact" id="btn-discard-workout">Descartar Treino</button>
+        <button id="finish" style="font-size:15px;padding:12px 24px;">Finalizar Treino ✓</button>
+      </div>
+    </div>
+
+    <div id="workout-items-container">
+      ${w.items.map((it, itemIdx) => `
+        <div class="card" data-workout-item="${it.id}">
+          <div class="row">
+            <h3>${it.position + 1}. ${esc(it.name)}</h3>
+            <button class="secondary compact" data-rest-timer="${it.rest}">Descanso (${it.rest}s)</button>
+          </div>
+          
+          <div class="set-row set-head">
+            <span>Série</span>
+            <span>Reps</span>
+            <span>Carga (kg)</span>
+            <span>Feito</span>
+          </div>
+
+          ${it.sets.map((s, setIdx) => `
+            <div class="set-row" data-set-id="${s.id}">
+              <span>#${s.position + 1}</span>
+              <input type="number" inputmode="numeric" min="0" max="1000" value="${s.reps}" data-set-field="reps" data-item="${itemIdx}" data-set="${setIdx}">
+              <input type="number" inputmode="decimal" step="0.5" min="0" max="9999" value="${s.load}" data-set-field="load" data-item="${itemIdx}" data-set="${setIdx}">
+              <div style="display:flex;justify-content:center;">
+                <input type="checkbox" ${s.done ? 'checked' : ''} data-set-field="done" data-item="${itemIdx}" data-set="${setIdx}">
+              </div>
+            </div>
+          `).join('')}
+
+          <input placeholder="Observações deste exercício (opcional)..." value="${esc(it.notes || '')}" data-item-notes="${itemIdx}" style="margin-top:12px;font-size:13px;">
+        </div>
+      `).join('')}
+    </div>
+
+    <section class="card" style="margin-top:24px;">
+      <label for="workout-general-notes">Anotações Gerais da Sessão:</label>
+      <textarea id="workout-general-notes" placeholder="Como foi o treino, energia, sensações...">${esc(w.notes || '')}</textarea>
+    </section>
+  `;
+
+  document.querySelectorAll('[data-rest-timer]').forEach(b => {
+    b.onclick = () => startTimer(+b.dataset.restTimer);
+  });
+
+  // Atualização instantânea em background a cada alteração
+  let saveDebounce = null;
+  function triggerAutoSave() {
+    clearTimeout(saveDebounce);
+    saveDebounce = setTimeout(async () => {
+      try {
+        await api(`workouts/${w.id}`, 'PUT', w);
+      } catch (err) {
+        console.error('Falha no auto-save:', err);
+      }
+    }, 600);
+  }
+
+  document.querySelectorAll('[data-set-field]').forEach(input => {
+    input.onchange = () => {
+      const itIdx = +input.dataset.item;
+      const stIdx = +input.dataset.set;
+      const fld = input.dataset.setField;
+      if (fld === 'done') {
+        w.items[itIdx].sets[stIdx].done = input.checked;
+        if (input.checked) {
+          const rest = w.items[itIdx].rest;
+          startTimer(rest);
+        }
+      } else if (fld === 'reps') {
+        w.items[itIdx].sets[stIdx].reps = +input.value;
+      } else if (fld === 'load') {
+        w.items[itIdx].sets[stIdx].load = parseFloat(input.value) || 0;
+      }
+      triggerAutoSave();
+    };
+  });
+
+  document.querySelectorAll('[data-item-notes]').forEach(inp => {
+    inp.oninput = () => {
+      w.items[+inp.dataset.itemNotes].notes = inp.value;
+      triggerAutoSave();
+    };
+  });
+
+  $('#workout-general-notes').oninput = e => {
+    w.notes = e.target.value;
+    triggerAutoSave();
+  };
+
+  $('#finish').onclick = async () => {
+    if (!await confirmAction('Deseja concluir e salvar este treino no histórico?')) return;
+    try {
+      w.finish = true;
+      await api(`workouts/${w.id}`, 'PUT', w);
+      activeWorkout = null;
+      notify('Treino concluído com sucesso! Bom descanso.', 'success');
+      location.hash = '#inicio';
+    } catch (err) {
+      notify(err.message, 'danger');
+    }
+  };
+
+  $('#btn-discard-workout').onclick = async () => {
+    if (!await confirmAction('Atenção: Descartar este treino apagará os dados desta sessão. Confirmar?')) return;
+    try {
+      await api(`workouts/${w.id}`, 'DELETE');
+      activeWorkout = null;
+      notify('Treino descartado.');
+      location.hash = '#inicio';
+    } catch (err) {
+      notify(err.message, 'danger');
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 4: Biometria e Fotos de Evolução Física (#biometria) (PONTO 2 e PONTO 4)
+// ---------------------------------------------------------------------------
+async function biometricsView() {
+  const [metrics, photos] = await Promise.all([
+    api('metrics/weight'),
+    api('evolution/photos')
+  ]);
+
+  main.innerHTML = heading('Evolução Física & Biometria', 'Acompanhamento soberano de peso corporal e fotos de progresso.') + `
+    <!-- PONTO 6: Sem barras de pesquisa redundantes nesta aba -->
+    <div class="grid">
+      <!-- Módulo 1: Peso Corporal (PONTO 4) -->
+      <section class="card">
+        <h2>Registro de Peso Corporal</h2>
+        <form id="weight-form" style="margin-bottom:20px;">
+          <div class="fields" style="grid-template-columns:1fr 1fr auto;">
+            <div>
+              <label for="weight-val">Peso (kg):</label>
+              <input id="weight-val" type="number" step="0.1" min="20" max="500" required placeholder="Ex: 65.5">
+            </div>
+            <div>
+              <label for="weight-date">Data:</label>
+              <input id="weight-date" type="date" value="${new Date().toISOString().slice(0, 10)}" required>
+            </div>
+            <div style="display:flex;align-items:flex-end;">
+              <button type="submit">Salvar</button>
+            </div>
+          </div>
+          <input id="weight-notes" placeholder="Notas sobre a pesagem (opcional)..." style="margin-top:10px;font-size:13px;">
+        </form>
+
+        ${renderWeightSvg(metrics)}
+
+        <h3 style="margin-top:24px;">Histórico de Medições</h3>
+        ${metrics.length ? `
+          <table class="exercise-table">
+            <thead><tr><th>Data</th><th>Peso</th><th>Variação</th><th>Notas</th><th></th></tr></thead>
+            <tbody>
+              ${metrics.map(m => {
+                const deltaStr = m.delta > 0 ? `+${m.delta.toFixed(2)} kg` : m.delta < 0 ? `${m.delta.toFixed(2)} kg` : '= 0.0 kg';
+                const deltaClass = m.delta > 0 ? 'delta-pos' : m.delta < 0 ? 'delta-neg' : 'delta-zero';
+                return `
+                  <tr>
+                    <td>${m.recorded_at.split('-').reverse().join('/')}</td>
+                    <td><strong>${m.weight.toFixed(1)} kg</strong></td>
+                    <td><span class="delta-badge ${deltaClass}">${deltaStr}</span></td>
+                    <td class="muted"><small>${esc(m.notes || '—')}</small></td>
+                    <td><button class="danger compact" data-del-weight="${m.id}">✕</button></td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        ` : `<p class="empty">Nenhuma pesagem cadastrada. Registre seu primeiro peso acima.</p>`}
+      </section>
+
+      <!-- Módulo 2: Galeria de Fotos de Evolução (PONTO 2) -->
+      <section class="card">
+        <div class="row">
+          <h2>Galeria de Fotos</h2>
+          <button id="btn-upload-photo">+ Nova Foto</button>
+        </div>
+        <p class="muted"><small>Pipeline WebP automático: compressão local para 1080px (80% qualidade) para economia de dados e espaço.</small></p>
+
+        ${photos.length ? `
+          <div class="photo-grid">
+            ${photos.map(p => `
+              <div class="photo-card">
+                <span class="photo-angle-tag">${p.angle}</span>
+                <img src="${p.photo_path}" alt="Foto de evolução" loading="lazy">
+                <div class="photo-card-info">
+                  <span class="muted">${p.taken_at.split('-').reverse().join('/')}</span>
+                  <button class="photo-delete" data-del-photo="${p.id}" title="Excluir foto">✕</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : `<p class="empty">Nenhuma foto adicionada ainda. Adicione fotos para acompanhar sua transformação.</p>`}
+      </section>
+    </div>
+  `;
+
+  // Listener Peso
+  $('#weight-form').onsubmit = async e => {
+    e.preventDefault();
+    const weight = parseFloat($('#weight-val').value);
+    const recorded_at = $('#weight-date').value;
+    const notes = $('#weight-notes').value.trim();
+    try {
+      await api('metrics/weight', 'POST', { weight, recorded_at, notes });
+      notify('Peso registrado com sucesso!', 'success');
+      biometricsView();
+    } catch (err) {
+      notify(err.message, 'danger');
+    }
+  };
+
+  document.querySelectorAll('[data-del-weight]').forEach(b => {
+    b.onclick = async () => {
+      if (!await confirmAction('Excluir este registro de peso?')) return;
+      try {
+        await api(`metrics/weight/${b.dataset.delWeight}`, 'DELETE');
+        biometricsView();
+        notify('Registro excluído.');
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  });
+
+  // Listener Fotos
+  $('#btn-upload-photo').onclick = () => openPhotoUploader();
+
+  document.querySelectorAll('[data-del-photo]').forEach(b => {
+    b.onclick = async () => {
+      if (!await confirmAction('Excluir esta foto da galeria?')) return;
+      try {
+        await api(`evolution/photos/${b.dataset.delPhoto}`, 'DELETE');
+        biometricsView();
+        notify('Foto removida.');
+      } catch (err) {
+        notify(err.message, 'danger');
+      }
+    };
+  });
+}
+
+// Modal de Upload com Compressão Canvas WebP (PONTO 2)
+function openPhotoUploader() {
+  dialogContent.innerHTML = `
+    <h2>Adicionar Foto de Evolução</h2>
+    <form id="photo-upload-form">
+      <label for="photo-file">Selecione ou Tire a Foto:</label>
+      <input type="file" id="photo-file" accept="image/*" required>
+
+      <label for="photo-angle">Ângulo da Foto:</label>
+      <select id="photo-angle">
+        <option value="frontal">Frontal</option>
+        <option value="costas">Costas</option>
+        <option value="lateral">Lateral</option>
+        <option value="outro">Outro / Detalhe</option>
+      </select>
+
+      <label for="photo-date">Data da Foto:</label>
+      <input type="date" id="photo-date" value="${new Date().toISOString().slice(0, 10)}" required>
+
+      <div id="photo-preview-box" style="margin:16px 0;text-align:center;"></div>
+
+      <div class="actions" style="margin-top:20px;">
+        <button type="submit" id="btn-submit-photo">Comprimir e Enviar</button>
+      </div>
+    </form>
+  `;
+
+  let compressedBlob = null;
+  const fileInput = $('#photo-file');
+  const previewBox = $('#photo-preview-box');
+
+  fileInput.onchange = () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    previewBox.innerHTML = '<p class="muted">Comprimindo imagem localmente...</p>';
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        // Redimensionamento para max 1080px
+        const maxW = 1080;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxW) {
+          h = Math.round(h * (maxW / w));
+          w = maxW;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+
+        canvas.toBlob(blob => {
+          compressedBlob = blob;
+          const url = URL.createObjectURL(blob);
+          previewBox.innerHTML = `
+            <img src="${url}" style="max-height:220px;border-radius:10px;display:inline-block;border:1px solid var(--line);">
+            <p class="muted"><small>Tamanho final: ${(blob.size / 1024).toFixed(0)} KB (WebP)</small></p>
+          `;
+        }, 'image/webp', 0.8);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  $('#photo-upload-form').onsubmit = async e => {
+    e.preventDefault();
+    if (!compressedBlob && !fileInput.files[0]) {
+      notify('Selecione uma foto.', 'danger');
+      return;
+    }
+
+    const submitBtn = $('#btn-submit-photo');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Enviando...';
+
+    const formData = new FormData();
+    const finalFile = compressedBlob || fileInput.files[0];
+    formData.append('photo', finalFile, 'photo.webp');
+    formData.append('angle', $('#photo-angle').value);
+    formData.append('taken_at', $('#photo-date').value);
+    formData.append('csrf_token', csrfToken);
+
+    try {
+      await api('evolution/photos', 'POST', formData, true);
+      dialog.close();
+      biometricsView();
+      notify('Foto enviada e adicionada à galeria!', 'success');
+    } catch (err) {
+      notify(err.message, 'danger');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Comprimir e Enviar';
+    }
+  };
+
+  dialog.showModal();
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 5: Catálogo de Exercícios com Chips e Busca (#exercicios) (PONTO 8)
+// ---------------------------------------------------------------------------
+async function exercisesView() {
+  const exercises = await api('exercises');
+  let activeMuscle = 'todos';
+  let searchTerm = '';
+
+  function renderList() {
+    const filtered = exercises.filter(e => {
+      const matchM = (activeMuscle === 'todos') || (e.muscle_group === activeMuscle);
+      const matchS = !searchTerm || e.name.toLowerCase().includes(searchTerm.toLowerCase());
+      return matchM && matchS;
+    });
+
+    main.innerHTML = heading('Catálogo Anatômico de Exercícios', 'Classificação direta por grupos musculares.') + `
+      <div class="row" style="margin-bottom:14px;">
+        <h2>Exercícios (${filtered.length})</h2>
+        <button id="btn-new-exercise">+ Novo Exercício</button>
+      </div>
+
+      <!-- Filtro por Chips Anatômicos (PONTO 8) -->
+      <div class="chips">
+        <div class="chip ${activeMuscle === 'todos' ? 'active' : ''}" data-muscle-filter="todos">Todos</div>
+        ${MUSCLE_ORDER.map(m => `
+          <div class="chip ${activeMuscle === m ? 'active' : ''}" data-muscle-filter="${m}">${MUSCLE_LABELS[m]}</div>
+        `).join('')}
+      </div>
+
+      <!-- PONTO 6: Busca permitida nesta aba de catálogo -->
+      <input id="catalog-search" placeholder="Buscar por nome do exercício..." value="${esc(searchTerm)}" style="margin:16px 0;">
+
+      ${filtered.length ? `
+        <table class="exercise-table">
+          <thead><tr><th>Exercício</th><th>Grupo Muscular</th><th>Equipamento</th><th>Ações</th></tr></thead>
+          <tbody>
+            ${filtered.map(ex => `
+              <tr>
+                <td><strong>${esc(ex.name)}</strong></td>
+                <td><span class="badge">${MUSCLE_LABELS[ex.muscle_group] || ex.muscle_group}</span></td>
+                <td class="muted"><small>${esc(ex.equipment || '—')}</small></td>
+                <td>
+                  ${ex.custom ? `
+                    <button class="secondary compact" data-edit-ex="${ex.id}">Editar</button>
+                    <button class="danger compact" data-del-ex="${ex.id}">✕</button>
+                  ` : '<span class="muted"><small>Padrão</small></span>'}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : `<p class="empty">Nenhum exercício encontrado com esses filtros.</p>`}
+    `;
+
+    document.querySelectorAll('[data-muscle-filter]').forEach(c => {
+      c.onclick = () => {
+        activeMuscle = c.dataset.muscleFilter;
+        renderList();
+      };
+    });
+
+    const searchInp = $('#catalog-search');
+    searchInp.oninput = () => {
+      searchTerm = searchInp.value;
+      renderList();
+    };
+
+    $('#btn-new-exercise').onclick = () => openExerciseEditor();
+
+    document.querySelectorAll('[data-edit-ex]').forEach(b => {
+      b.onclick = () => {
+        const ex = exercises.find(x => x.id === +b.dataset.editEx);
+        openExerciseEditor(ex);
+      };
+    });
+
+    document.querySelectorAll('[data-del-ex]').forEach(b => {
+      b.onclick = async () => {
+        if (!await confirmAction('Excluir este exercício customizado?')) return;
+        try {
+          await api(`exercises/${b.dataset.delEx}`, 'DELETE');
+          exercisesView();
+          notify('Exercício excluído.');
+        } catch (err) {
+          notify(err.message, 'danger');
+        }
+      };
+    });
+  }
+
+  renderList();
+}
+
+function openExerciseEditor(existing = null) {
+  dialogContent.innerHTML = `
+    <h2>${existing ? 'Editar Exercício' : 'Novo Exercício'}</h2>
+    <form id="ex-form">
+      <label for="ex-name">Nome do Exercício:</label>
+      <input id="ex-name" required value="${existing ? esc(existing.name) : ''}" placeholder="Ex: Supino Inclinado com Halteres">
+
+      <label for="ex-muscle">Grupo Muscular Principal:</label>
+      <select id="ex-muscle">
+        ${MUSCLE_ORDER.map(m => `
+          <option value="${m}" ${existing && existing.muscle_group === m ? 'selected' : ''}>${MUSCLE_LABELS[m]}</option>
+        `).join('')}
+      </select>
+
+      <label for="ex-equip">Equipamento (opcional):</label>
+      <input id="ex-equip" value="${existing ? esc(existing.equipment || '') : ''}" placeholder="Ex: Halteres, Barra, Máquina">
+
+      <div class="actions" style="margin-top:20px;">
+        <button type="submit">Salvar Exercício</button>
+      </div>
+    </form>
+  `;
+
+  $('#ex-form').onsubmit = async e => {
+    e.preventDefault();
+    const payload = {
+      name: $('#ex-name').value.trim(),
+      muscle_group: $('#ex-muscle').value,
+      equipment: $('#ex-equip').value.trim()
+    };
+    try {
+      if (existing) {
+        await api(`exercises/${existing.id}`, 'PUT', payload);
+      } else {
+        await api('exercises', 'POST', payload);
+      }
+      dialog.close();
+      exercisesView();
+      notify('Exercício salvo com sucesso!', 'success');
+    } catch (err) {
+      notify(err.message, 'danger');
+    }
+  };
+
+  dialog.showModal();
+}
+
+// ---------------------------------------------------------------------------
+// VIEW 6: Histórico de Séries e Cargas (#historico)
+// ---------------------------------------------------------------------------
+async function historyView() {
+  const exercises = await api('exercises');
+  let selectedExerciseId = exercises.length ? exercises[0].id : null;
+
+  async function loadHistoryFor(exId) {
+    if (!exId) return;
+    const records = await api(`history/${exId}`);
+    const ex = exercises.find(x => x.id === exId);
+
+    const histBox = $('#history-details-box');
+    if (!records.length) {
+      histBox.innerHTML = `<p class="empty">Nenhum treino finalizado para <strong>${esc(ex.name)}</strong> ainda.</p>`;
+      return;
+    }
+
+    // Agrupa por data
+    const byDate = {};
+    records.forEach(r => {
+      const d = r.date.slice(0, 10);
+      (byDate[d] ??= []).push(r);
+    });
+
+    histBox.innerHTML = `
+      <h3>Progressão em ${esc(ex.name)}</h3>
+      <table class="exercise-table">
+        <thead><tr><th>Data</th><th>Série</th><th>Carga</th><th>Repetições</th></tr></thead>
+        <tbody>
+          ${records.map((r, i) => `
+            <tr>
+              <td>${r.date.slice(0, 10).split('-').reverse().join('/')}</td>
+              <td>#${i + 1}</td>
+              <td><strong>${r.load} kg</strong></td>
+              <td>${r.reps} reps</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  main.innerHTML = heading('Histórico de Cargas', 'Acompanhe a progressão detalhada por exercício.') + `
+    <!-- PONTO 6: Busca permitida nesta aba de Histórico -->
+    <div class="card">
+      <label for="history-ex-select">Selecione o Exercício:</label>
+      <select id="history-ex-select">
+        ${exercises.map(e => `<option value="${e.id}">${esc(e.name)} (${MUSCLE_LABELS[e.muscle_group] || e.muscle_group})</option>`).join('')}
+      </select>
+    </div>
+
+    <div id="history-details-box"></div>
+  `;
+
+  const sel = $('#history-ex-select');
+  sel.onchange = () => loadHistoryFor(+sel.value);
+  if (selectedExerciseId) loadHistoryFor(selectedExerciseId);
+}
+
+// ---------------------------------------------------------------------------
+// Router Principal (SPA)
+// ---------------------------------------------------------------------------
+function router() {
+  const hash = location.hash || '#inicio';
+  document.querySelectorAll('nav a').forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === hash);
+  });
+
+  if (hash === '#rotinas') {
+    routinesView();
+  } else if (hash === '#treino') {
+    workoutView();
+  } else if (hash === '#biometria') {
+    biometricsView();
+  } else if (hash === '#exercicios') {
+    exercisesView();
+  } else if (hash === '#historico') {
+    historyView();
+  } else {
+    dashboardView();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inicialização do App (PONTO 1: Bypass de Senha e Inicialização Transparente)
+// ---------------------------------------------------------------------------
+async function boot() {
+  $('#close-dialog').onclick = () => dialog.close();
+  initTimer();
+
+  try {
+    const authData = await api('auth');
+    csrfToken = authData.csrf;
+  } catch (err) {
+    console.error('Falha na inicialização da autenticação:', err);
+  }
+
+  window.addEventListener('hashchange', router);
+  router();
+}
+
+boot();

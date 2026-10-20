@@ -14,9 +14,6 @@ content = (
     f"DATABASE_URL=sqlite:///{database}\n"
     f"SECRET_KEY={secrets.token_hex(32)}\n"
     "COOKIE_SECURE=false\n"
-    "GEMINI_ENABLED=false\n"
-    "GEMINI_FREE_PROJECT_CONFIRMED=false\n"
-    "GEMINI_API_KEY=\n"
 )
 fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, 'w') as f:
