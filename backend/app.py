@@ -117,6 +117,8 @@ class Exercise(Base):
     notes: Mapped[str] = mapped_column(Text, default='')
     custom: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # Coluna legada da v1.0 (NOT NULL no banco migrado). Mantida em sincronia com muscle_group.
+    legacy_muscle: Mapped[str] = mapped_column('muscle', String(60), default='')
 
 class Routine(Base):
     __tablename__ = 'routines'
@@ -126,6 +128,8 @@ class Routine(Base):
     target_muscle_groups: Mapped[str] = mapped_column(String(255), default='') # ex: 'peito,triceps'
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # Coluna legada da v1.0 (NOT NULL no banco migrado). O conceito de "foco" não é mais usado.
+    legacy_goal: Mapped[str] = mapped_column('goal', String(30), default='')
     items: Mapped[list['RoutineItem']] = relationship(cascade='all, delete-orphan', order_by='RoutineItem.position')
 
 class RoutineItem(Base):
@@ -212,8 +216,52 @@ CATALOG = {
     'outro': ['Bicicleta ergométrica', 'Esteira / Caminhada', 'Alongamento geral']
 }
 
+SQL_TYPES = {Integer: 'INTEGER', Boolean: 'BOOLEAN', DateTime: 'DATETIME', Date: 'DATE',
+             Numeric: 'NUMERIC', String: 'TEXT', Text: 'TEXT'}
+
+def _sql_default(col):
+    d = col.default
+    if d is None or not getattr(d, 'is_scalar', False):
+        return ''
+    v = d.arg
+    if isinstance(v, bool): v = int(v)
+    if isinstance(v, (int, float)): return f' DEFAULT {v}'
+    return " DEFAULT '" + str(v).replace("'", "''") + "'"
+
+def auto_migrate():
+    """Adiciona ao SQLite toda coluna declarada nos modelos que ainda não exista no banco.
+    Evita erros 'no such column' ao atualizar bancos criados em versões anteriores."""
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {r[1] for r in conn.execute(text(f'PRAGMA table_info("{table.name}")'))}
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                sql_type = next((v for k, v in SQL_TYPES.items() if isinstance(col.type, k)), 'TEXT')
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {sql_type}{_sql_default(col)}'))
+
+# Reclassificação dos exercícios herdados da v1.0 (grupos genéricos como "Braços" e "Pernas").
+LEGACY_NAME_GROUPS = [
+    ('tríceps', 'triceps'), ('triceps', 'triceps'), ('rosca', 'biceps'),
+    ('panturrilha', 'panturrilha'), ('flexora', 'posterior'), ('stiff', 'posterior'),
+    ('pélvica', 'posterior'), ('agachamento', 'quadriceps'), ('leg press', 'quadriceps'),
+    ('extensora', 'quadriceps'), ('supino', 'peito'), ('crucifixo', 'peito'),
+    ('puxada', 'costas'), ('remada', 'costas'), ('desenvolvimento', 'ombros'),
+    ('elevação lateral', 'ombros'), ('abdominal', 'abdomen'), ('prancha', 'abdomen'),
+]
+LEGACY_MUSCLE_GROUPS = {'peito': 'peito', 'costas': 'costas', 'pernas': 'quadriceps', 'ombros': 'ombros',
+                        'braços': 'biceps', 'abdômen': 'abdomen'}
+
+def classify_legacy(name, muscle):
+    n = (name or '').lower()
+    for key, group in LEGACY_NAME_GROUPS:
+        if key in n:
+            return group
+    return LEGACY_MUSCLE_GROUPS.get((muscle or '').strip().lower(), 'outro')
+
 def initialize_database():
     Base.metadata.create_all(engine)
+    auto_migrate()  # precisa rodar antes de qualquer consulta ORM
     with DB.begin() as db:
         # Garante existência do usuário id = 1 (Single-User Mode)
         if not db.get(User, 1):
@@ -223,32 +271,31 @@ def initialize_database():
         if not db.scalar(select(Exercise.id).limit(1)):
             for muscle, names in CATALOG.items():
                 for name in names:
-                    db.add(Exercise(name=name, muscle_group=muscle, custom=False))
+                    db.add(Exercise(name=name, muscle_group=muscle, legacy_muscle=muscle, custom=False))
 
-    # Migration safe checks for SQLite schema upgrades
-    try:
-        with engine.connect() as conn:
-            # Add session_date to workouts if upgrading from v1.0
-            conn.execute(text("ALTER TABLE workouts ADD COLUMN session_date TEXT"))
-            conn.commit()
-    except Exception:
-        pass
+        # Exercícios vindos da v1.0: o rótulo antigo (ex.: 'Braços', 'Pernas') ou migração parcial anterior
+        # é ajustado pelo nome para o grupo anatômico exato (ex.: Tríceps -> triceps, Flexora -> posterior).
+        for e in db.scalars(select(Exercise)):
+            legacy = (e.legacy_muscle or '').strip().lower()
+            expected = classify_legacy(e.name, e.legacy_muscle or e.muscle_group)
+            if legacy not in MUSCLE_GROUPS or e.muscle_group not in MUSCLE_GROUPS or (not e.custom and expected != 'outro' and e.muscle_group != expected):
+                e.muscle_group = expected
+                e.legacy_muscle = e.muscle_group
 
-    try:
-        with engine.connect() as conn:
-            # Add target_muscle_groups to routines if upgrading from v1.0
-            conn.execute(text("ALTER TABLE routines ADD COLUMN target_muscle_groups TEXT DEFAULT ''"))
-            conn.commit()
-    except Exception:
-        pass
+        # Treinos antigos sem session_date
+        for w in db.scalars(select(Workout).where(Workout.session_date.is_(None))):
+            w.session_date = w.started_at.strftime('%Y-%m-%d')
 
-    try:
-        with engine.connect() as conn:
-            # Add muscle_group to exercises if upgrading from v1.0
-            conn.execute(text("ALTER TABLE exercises ADD COLUMN muscle_group TEXT DEFAULT 'outro'"))
-            conn.commit()
-    except Exception:
-        pass
+        # Rotinas vindas da v1.0 sem target_muscle_groups: preenche a partir dos exercícios da rotina
+        for r in db.scalars(select(Routine).options(selectinload(Routine.items).selectinload(RoutineItem.exercise))):
+            if not (r.target_muscle_groups or '').strip() and r.items:
+                groups = []
+                for it in r.items:
+                    mg = it.exercise.muscle_group if it.exercise else None
+                    if mg and mg in MUSCLE_GROUPS and mg not in groups:
+                        groups.append(mg)
+                if groups:
+                    r.target_muscle_groups = ','.join(groups)
 
 initialize_database()
 
@@ -577,6 +624,7 @@ def exercise_edit(id=None):
         if group not in MUSCLE_GROUPS:
             group = 'outro'
         e.muscle_group = group
+        e.legacy_muscle = group
         e.equipment = string(d.get('equipment', ''), 'Equipamento', 100) if d.get('equipment') else ''
         db.add(e)
         db.flush()
@@ -610,9 +658,12 @@ def set_routine(db, r, d):
     if not isinstance(items, list) or not 1 <= len(items) <= 25:
         raise InputError('A rotina deve ter entre 1 e 25 exercícios.')
     r.items.clear()
+    derived_groups = []
     for pos, i in enumerate(items):
         if not isinstance(i, dict): raise InputError('Exercício inválido.')
         ex = found(db, Exercise, integer(i.get('exercise_id'), 'Exercício', 1, 1000000))
+        if ex.muscle_group in MUSCLE_GROUPS and ex.muscle_group not in derived_groups:
+            derived_groups.append(ex.muscle_group)
         r.items.append(RoutineItem(
             exercise=ex,
             position=pos,
@@ -621,6 +672,8 @@ def set_routine(db, r, d):
             rest=integer(i.get('rest'), 'Descanso', 0, 600),
             target_reps=str(i.get('target_reps') or f"{i.get('reps', 10)}")[:20]
         ))
+    if not r.target_muscle_groups and derived_groups:
+        r.target_muscle_groups = ','.join(derived_groups)
 
 @app.get('/api/routines')
 @authenticated
@@ -985,8 +1038,8 @@ def schedule_create():
     except (ValueError, TypeError):
         raise InputError('Informe uma data e horário válidos.')
     
-    # Bloqueio de agendamento no passado (RF07)
-    if stamp < now().replace(second=0, microsecond=0):
+    # Bloqueio de agendamento em datas passadas (RF07)
+    if stamp.date() < today_date():
         raise InputError('Não é permitido agendar treinos em datas passadas.')
 
     with schedule_lock, DB.begin() as db:

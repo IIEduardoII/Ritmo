@@ -4,9 +4,9 @@
     ESPECIFICAÇÃO DE REQUISITOS, ARQUITETURA, MODELAGEM E PLANO DE OPERAÇÃO
 ================================================================================
 
-Autor do Projeto:      Eduardo Camilo
+Autor do Projeto:      IIEduardoII
 Ambiente Alvo:         Híbrido Linux Desktop & Android / Termux (Nginx, Gunicorn, SQLite WAL)
-Diretório de Backup:   /home/camilo/projetos/Ritmo/1.0
+Diretório de Backup:   ${HOME}/projetos/Ritmo/1.0
 Status:                Planejamento de Migração e Refatoração (v1.0 -> v1.1)
 Data da Especificação: Outubro de 2026 • Versão 1.1.0
 
@@ -33,7 +33,7 @@ Principais pilares desta atualização:
      substituindo-os por categorização anatômica direta e filtros reativos.
   5. Unificação de Base de Código e Governança DevOps:
      Extinção da separação física de branches entre servidor Linux e Termux,
-     com trava obrigatória de backup em `/home/camilo/projetos/Ritmo/1.0`
+     com trava obrigatória de backup em `${HOME}/projetos/Ritmo/1.0`
      antes de qualquer alteração em ambiente produtivo.
 
 ================================================================================
@@ -152,9 +152,9 @@ Principais pilares desta atualização:
 - Regra de Negócio Inegociável (RN07):
   * Antes de qualquer migração de schema ou alteração de arquivos em produção,
     o sistema deve gerar uma cópia integral consistente do projeto e do banco
-    SQLite em: `/home/camilo/projetos/Ritmo/1.0`.
+    SQLite em: `${HOME}/projetos/Ritmo/1.0`.
   * O script de deploy deve abortar imediatamente caso a integridade do
-    backup em `/home/camilo/projetos/Ritmo/1.0` não seja validada com sucesso.
+    backup em `${HOME}/projetos/Ritmo/1.0` não seja validada com sucesso.
 
 ================================================================================
 3. MATRIZ DE REQUISITOS (MOSCOW)
@@ -308,8 +308,8 @@ Finalidade: Congelar com integridade absoluta o estado da v1.0 antes do deploy.
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP_DIR="/home/camilo/projetos/Ritmo/1.0"
-PROD_DIR="/home/camilo/projetos/Ritmo/prod"
+BACKUP_DIR="${HOME}/projetos/Ritmo/1.0"
+PROD_DIR="${HOME}/projetos/Ritmo/prod"
 DB_SRC="$PROD_DIR/data/ritmo.db"
 
 echo "=========================================================="
@@ -358,7 +358,7 @@ echo "=========================================================="
 ================================================================================
 
 ETAPA 1: Trava e Congelamento de Backup da v1.0
-  * Executar `backup_pre_deploy.sh` e assegurar que `/home/camilo/projetos/Ritmo/1.0`
+  * Executar `backup_pre_deploy.sh` e assegurar que `${HOME}/projetos/Ritmo/1.0`
     contém o snapshot íntegro do código e banco legado.
 
 ETAPA 2: Limpeza Estrutural e Remoção de Dependências

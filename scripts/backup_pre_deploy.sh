@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP_DIR="/home/camilo/projetos/Ritmo/1.0"
+BACKUP_DIR="${HOME}/projetos/Ritmo/1.0"
 PROD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_SRC="${RITMO_DB_PATH:-$HOME/.local/share/ritmo/ritmo.sqlite3}"
 

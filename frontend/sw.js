@@ -1,5 +1,5 @@
 'use strict';
-const CACHE = 'ritmo-shell-v1.1.0';
+const CACHE = 'ritmo-shell-v1.1.1';
 const SHELL = [
   '/', '/index.html', '/style.css', '/install.js', '/app.js',
   '/manifest.webmanifest', '/logo.svg', '/symbol.svg',
